@@ -1,0 +1,31 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Ball Base (Dark Circle) -->
+    <path
+        android:fillColor="#11131F"
+        android:pathData="M54,54m-48,0a48,48 0,1 1,96 0a48,48 0,1 1,-96 0" />
+    <!-- Ball Outer Rim / Border -->
+    <path
+        android:strokeColor="#2A2D40"
+        android:strokeWidth="2"
+        android:pathData="M54,54m-47,0a47,47 0,1 1,94 0a47,47 0,1 1,-94 0" />
+    <!-- Ball Gloss Highlight -->
+    <path
+        android:fillColor="#22FFFFFF"
+        android:pathData="M32,24 C40,16 68,16 76,24 C68,20 40,20 32,24 Z" />
+    <!-- Inner White Circle for the Number -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,54m-20,0a20,20 0,1 1,40 0a20,20 0,1 1,-40 0" />
+    <!-- Number 8 Top Loop -->
+    <path
+        android:fillColor="#11131F"
+        android:pathData="M54,41 C57.3,41 60,43.2 60,46 C60,48.8 57.3,51 54,51 C50.7,51 48,48.8 48,46 C48,43.2 50.7,41 54,41 Z M54,43.5 C52.3,43.5 51,44.6 51,46 C51,47.4 52.3,48.5 54,48.5 C55.7,48.5 57,47.4 57,46 C57,44.6 55.7,43.5 54,43.5 Z" />
+    <!-- Number 8 Bottom Loop -->
+    <path
+        android:fillColor="#11131F"
+        android:pathData="M54,49.5 C58,49.5 61.5,52 61.5,55.5 C61.5,59 58,61.5 54,61.5 C50,61.5 46.5,59 46.5,55.5 C46.5,52 50,49.5 54,49.5 Z M54,52 C52,52 50,53.5 50,55.5 C50,57.5 52,59 54,59 C56,59 58,57.5 58,55.5 C58,53.5 56,52 54,52 Z" />
+</vector>

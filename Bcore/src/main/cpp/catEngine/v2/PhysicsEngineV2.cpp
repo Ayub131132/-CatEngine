@@ -1,0 +1,943 @@
+#include "PhysicsEngineV2.h"
+#include <cmath>
+#include <vector>
+#include <algorithm>
+#include <android/log.h>
+#include <chrono>
+
+#ifndef LOG_TAG
+#define LOG_TAG "CatEngine-V2"
+#endif
+
+#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
+#define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+namespace catengine {
+namespace v2 {
+
+static bool s_diagnosticsEnabled = true;
+
+void enableDiagnostics(bool enable) {
+    s_diagnosticsEnabled = enable;
+}
+
+bool isDiagnosticsEnabled() {
+    return s_diagnosticsEnabled;
+}
+
+struct BodyInternal {
+    int id = -1;
+    int puckType = 0; // 0 = Striker, 1 = White, 2 = Black, 3 = Queen
+    double px = 0.0;
+    double py = 0.0;
+    double vx = 0.0;
+    double vy = 0.0;
+    double wx = 0.0; // Surface rolling velocity X: omega_y * R (cm/s)
+    double wy = 0.0; // Surface rolling velocity Y: -omega_x * R (cm/s)
+    double wz = 0.0; // Authentic vertical angular velocity / spin omega_z (rad/s, libgame.so + 0x70)
+    double r_omega = 0.0; // Surface rolling speed: R * Omega (cm/s)
+    double distTraveled = 0.0; // Total cumulative distance traveled from launch (cm)
+    double mass = 1.0;
+    double radius = 1.95;
+    int chainLevel = -1; // 0 = striker, 1 = primary hit puck, 2 = secondary cascade
+    double initX = 0.0;
+    double initY = 0.0;
+    double segStartX = 0.0;
+    double segStartY = 0.0;
+    bool inPocket = false;
+    bool inPocketDrop = false; // Authentic pocket sinking transition (libgame.so state == 2, 0x1997e8c)
+    double pocketDropTime = 0.0; // Sinking time accumulator (libgame.so +0xb8)
+    double lastPocketDistSq = 999.0;
+    int pocketIndex = -1;
+    double pocketCenterX = 0.0;
+    double pocketCenterY = 0.0;
+    double lastSegAngle = 0.0;
+    int hitByEntityId = -1; // -1 = None, 0 = Striker, >0 = Puck ID
+    double hitSpeed = 0.0;
+    int cushionBounces = 0;
+    std::vector<TrajectorySegment> segments;
+};
+
+static inline bool isPuckAlreadyPotted(double x, double y, double inset, double captureRad) {
+    if (std::isnan(x) || std::isnan(y)) return true;
+    double ax = std::abs(x);
+    double ay = std::abs(y);
+    if (ax > 38.0 || ay > 38.0) return true;
+    if (ax > 29.0 && ay > 29.0) {
+        double dx = ax - inset;
+        double dy = ay - inset;
+        if (std::hypot(dx, dy) < captureRad) return true;
+    }
+    return false;
+}
+
+SimResult simulate(double startX, double startY, double shotAngle, double forceVal,
+                   const std::vector<PuckInput>& pucks,
+                   const PhysicsConfig& config,
+                   int maxSteps) {
+    SimResult result;
+
+    // 1. Initial striker launch calculation (libgame.so 0x1B2C3A4)
+    // Pure linear interpolation matching authentic TableLogic::launchStriker:
+    // v0 = minPower + f * (maxPower - minPower)
+    // When f == 1.0 (full pull), striker power bonus is applied if available.
+    double f = std::clamp(forceVal, 0.0, 1.0);
+    double minP = config.minPower;
+    double maxP = config.maxPower;
+
+    double v0 = minP + f * (maxP - minP);
+    if (f >= 0.999 && config.strikerBonus > 0.0) {
+        v0 += config.strikerBonus;
+    }
+    v0 *= config.powerMultiplier;
+
+    // 2. Setup rigid bodies
+    std::vector<BodyInternal> bodies;
+    bodies.reserve(pucks.size() + 1);
+
+    // Striker (Body 0)
+    // Note: libgame.so (0x1B2C474-0x1B2C484) initializes striker angular velocities
+    // to zero (wx = 0, wy = 0, wz = 0) at launch. The striker starts in pure sliding/slip,
+    // which triggers the authentic 196 cm/s^2 slip deceleration until rolling begins.
+    BodyInternal striker;
+    striker.id = -1;
+    striker.puckType = 0;
+    striker.px = startX;
+    striker.py = startY;
+    striker.vx = v0 * std::cos(shotAngle);
+    striker.vy = v0 * std::sin(shotAngle);
+    striker.mass = config.strikerMass;
+    striker.radius = config.strikerRadius;
+    striker.chainLevel = 0;
+    striker.wz = 0.0;
+    striker.wx = 0.0;
+    striker.wy = 0.0;
+    striker.initX = startX;
+    striker.initY = startY;
+    striker.segStartX = startX;
+    striker.segStartY = startY;
+    striker.lastSegAngle = shotAngle;
+    bodies.push_back(striker);
+
+    // Add table pucks
+    for (const auto& p : pucks) {
+        if (!p.active) continue;
+        if (isPuckAlreadyPotted(p.x, p.y, config.pocketInset, config.pocketRadius)) continue;
+
+        BodyInternal pb;
+        pb.id = p.id;
+        pb.puckType = p.puckType;
+        pb.px = p.x;
+        pb.py = p.y;
+        pb.vx = 0.0;
+        pb.vy = 0.0;
+        pb.mass = config.puckMass;
+        pb.radius = config.puckRadius;
+        pb.chainLevel = -1;
+        pb.wz = 0.0;
+        pb.initX = p.x;
+        pb.initY = p.y;
+        pb.segStartX = p.x;
+        pb.segStartY = p.y;
+        pb.lastSegAngle = 0.0;
+        bodies.push_back(pb);
+    }
+
+    // 4 Corner Pocket Centers
+    const double pocketCenters[4][2] = {
+        {  config.pocketInset,  config.pocketInset }, // Pocket 0: Top-Right
+        { -config.pocketInset,  config.pocketInset }, // Pocket 1: Top-Left
+        {  config.pocketInset, -config.pocketInset }, // Pocket 2: Bottom-Right
+        { -config.pocketInset, -config.pocketInset }  // Pocket 3: Bottom-Left
+    };
+
+    // Setup authentic cushion polygon (libgame.so TableLogic + 0x198)
+    std::vector<Point2D> tablePolygon = config.cushionVertices;
+    if (tablePolygon.size() < 3) {
+        // Default authentic Carrom Pool table octagon (37.0 cm board with corner pocket bevels)
+        const double h = config.boardHalfSize;       // 37.00 cm
+        const double c = config.pocketJawCutoff;     // 32.80 cm
+        tablePolygon = {
+            { -c,  h }, // 0: Top cushion left
+            {  c,  h }, // 1: Top cushion right
+            {  h,  c }, // 2: Top-Right bevel start
+            {  h, -c }, // 3: Right cushion bottom
+            {  c, -h }, // 4: Bottom-Right bevel start
+            { -c, -h }, // 5: Bottom cushion left
+            { -h, -c }, // 6: Bottom-Left bevel start
+            { -h,  c }  // 7: Left cushion top
+        };
+    }
+
+    const double dt = 0.001; // Authentic 1000 Hz integration step (libgame.so 0x12ea830)
+    const double gDecel = 980.0;
+    const double minSpeed = 0.15; // Stop moving when velocity falls below 0.15 cm/s
+
+    // Main Simulation Loop
+    for (int step = 0; step < maxSteps; step++) {
+        bool anyMotion = false;
+        for (const auto& b : bodies) {
+            if (!b.inPocket && std::hypot(b.vx, b.vy) > minSpeed) {
+                anyMotion = true;
+                break;
+            }
+        }
+        if (!anyMotion) break;
+
+        double timeLeft = dt;
+        int subStep = 0;
+        const int maxSubSteps = 32;
+
+        while (timeLeft > 1e-6 && subStep < maxSubSteps) {
+            subStep++;
+
+            double earliestT = timeLeft;
+            int eventType = 0; // 0 = none, 1 = disc-disc contact, 2 = cushion bounce
+            size_t eventI = 0, eventJ = 0;
+            double eventCushionNormalAngle = 0.0;
+
+            // -------------------------------------------------------------
+            // A. Continuous Collision Detection (CCD): Disc vs Disc (libgame.so 0x19985e0)
+            // -------------------------------------------------------------
+            for (size_t i = 0; i < bodies.size(); i++) {
+                const auto& bi = bodies[i];
+                if (bi.inPocket) continue;
+
+                for (size_t j = i + 1; j < bodies.size(); j++) {
+                    const auto& bj = bodies[j];
+                    if (bj.inPocket) continue;
+
+                    if (std::hypot(bi.vx, bi.vy) <= minSpeed && std::hypot(bj.vx, bj.vy) <= minSpeed) {
+                        continue;
+                    }
+
+                    double rSum = bi.radius + bj.radius;
+                    double rx = bj.px - bi.px;
+                    double ry = bj.py - bi.py;
+                    double rSq = rx * rx + ry * ry;
+
+                    // Relative velocity: v = V_j - V_i
+                    double vx = bj.vx - bi.vx;
+                    double vy = bj.vy - bi.vy;
+
+                    double A = vx * vx + vy * vy;
+                    if (A <= 1e-9) continue;
+
+                    // Dot product: r . v (negative when approaching)
+                    double dotRV = rx * vx + ry * vy;
+                    double C = rSq - (rSum * rSum);
+
+                    if (C <= 0.0) {
+                        // Already touching or overlapping
+                        if (dotRV < -1e-6) {
+                            if (0.0 < earliestT) {
+                                earliestT = 0.0;
+                                eventType = 1;
+                                eventI = i;
+                                eventJ = j;
+                            }
+                        }
+                    } else if (dotRV < -1e-6) {
+                        // Approaching each other: quadratic A*t^2 + 2*dotRV*t + C = 0
+                        double disc = dotRV * dotRV - A * C;
+                        if (disc >= 0.0) {
+                            double tHit = (-dotRV - std::sqrt(disc)) / A;
+                            if (tHit >= 0.0 && tHit < earliestT) {
+                                earliestT = tHit;
+                                eventType = 1;
+                                eventI = i;
+                                eventJ = j;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // -------------------------------------------------------------
+            // B. Authentic Cushion Segment & Corner CCD (libgame.so 0x19984cc & 0x19985e0)
+            // -------------------------------------------------------------
+            const size_t numVerts = tablePolygon.size();
+            for (size_t i = 0; i < bodies.size(); i++) {
+                const auto& b = bodies[i];
+                if (b.inPocket) continue;
+                if (std::hypot(b.vx, b.vy) <= minSpeed) continue;
+
+                for (size_t k = 0; k < numVerts; k++) {
+                    const auto& A = tablePolygon[k];
+                    const auto& B = tablePolygon[(k + 1) % numVerts];
+
+                    double dx = B.x - A.x;
+                    double dy = B.y - A.y;
+                    double L = std::hypot(dx, dy);
+                    if (L < 1e-6) continue;
+
+                    // Relative cross product: (B - A) x v
+                    double cross = dx * b.vy - dy * b.vx;
+                    if (std::abs(cross) < 1e-9) continue;
+
+                    double invL = 1.0 / L;
+                    // Inward unit normal for clockwise polygon: (dy / L, -dx / L)
+                    double nx = dy * invL;
+                    double ny = -dx * invL;
+
+                    // Body must be moving towards cushion: normal . v < 0
+                    double vNorm = nx * b.vx + ny * b.vy;
+                    if (vNorm >= 0.0) continue;
+
+                    // Point on disc closest to segment along -normal
+                    double px_edge = b.px - nx * b.radius;
+                    double py_edge = b.py - ny * b.radius;
+
+                    double Dx = px_edge - A.x;
+                    double Dy = py_edge - A.y;
+
+                    // Parametric coordinate u along segment (0 to 1)
+                    double u = (Dx * b.vy - Dy * b.vx) / cross;
+                    if (u >= 0.0 && u <= 1.0) {
+                        double tHit = (dx * Dy - dy * Dx) / (-cross);
+                        if (tHit >= 0.0 && tHit < earliestT) {
+                            earliestT = tHit;
+                            eventType = 2; // Segment bounce
+                            eventI = i;
+                            eventCushionNormalAngle = -std::atan2(dy, dx);
+                        }
+                    }
+
+                    // Rounded corner check at vertex A (libgame.so 0x1B3703C & 0x19985e0)
+                    double rx = A.x - b.px;
+                    double ry = A.y - b.py;
+                    double B_corner = -2.0 * (rx * b.vx + ry * b.vy);
+                    if (B_corner < 0.0) {
+                        double A_corner = b.vx * b.vx + b.vy * b.vy;
+                        double C_corner = rx * rx + ry * ry;
+                        double rSq = b.radius * b.radius;
+                        double dMinCornerSq = C_corner + (B_corner * B_corner) / (-4.0 * A_corner);
+                        if (dMinCornerSq < rSq) {
+                            double discCorner = B_corner * B_corner - 4.0 * A_corner * (C_corner - rSq);
+                            if (discCorner >= 0.0) {
+                                double tHitCorner = (-B_corner - std::sqrt(discCorner)) / (2.0 * A_corner);
+                                if (tHitCorner >= 0.0 && tHitCorner < earliestT) {
+                                    earliestT = tHitCorner;
+                                    eventType = 2; // Corner bounce
+                                    eventI = i;
+                                    double cnx = (b.px + b.vx * tHitCorner) - A.x;
+                                    double cny = (b.py + b.vy * tHitCorner) - A.y;
+                                    // Authentic libgame.so (0x1B2C864-0x1B2C87C): theta = -atan2(Nx, -Ny) where N = P - A
+                                    eventCushionNormalAngle = -std::atan2(cnx, -cny);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // -------------------------------------------------------------
+            // Advance bodies to earliestT using Authentic Two-Phase Friction
+            // -------------------------------------------------------------
+            double advanceDt = earliestT;
+            if (advanceDt > 1e-8) {
+                // 1. Advance positions first using exact velocities solved in CCD
+                for (auto& b : bodies) {
+                    if (b.inPocket) continue;
+                    double spd = std::hypot(b.vx, b.vy);
+                    if (spd > minSpeed) {
+                        b.px += b.vx * advanceDt;
+                        b.py += b.vy * advanceDt;
+                        b.distTraveled += spd * advanceDt;
+
+                        // Corner Pocket Attraction & Drop Entry (libgame.so 0x1B2CB14 & 0x1997e8c)
+                        for (int p = 0; p < 4; p++) {
+                            double dx = pocketCenters[p][0] - b.px;
+                            double dy = pocketCenters[p][1] - b.py;
+                            double dSq = dx * dx + dy * dy;
+                            double dropRadius = std::min(static_cast<double>(config.pocketRadius), 2.15);
+                            if (dSq <= dropRadius * dropRadius) {
+                                double curSpd = std::hypot(b.vx, b.vy);
+                                // Vector from body to pocket center is (dx, dy).
+                                // Velocity dot product: dotVel > 0 means moving towards pocket center!
+                                double dotVel = dx * b.vx + dy * b.vy;
+                                bool movingTowards = (dSq <= 1.20 * 1.20) || (dotVel > 0.0);
+                                bool speedValid = (dSq <= 1.40 * 1.40) ? (curSpd <= config.pocketDropMaxSpeed) : (curSpd <= 180.0);
+                                bool canDrop = movingTowards && speedValid;
+                                if (canDrop && !b.inPocketDrop) {
+                                    b.inPocketDrop = true;
+                                    b.pocketIndex = p;
+                                    b.pocketCenterX = pocketCenters[p][0];
+                                    b.pocketCenterY = pocketCenters[p][1];
+                                    b.pocketDropTime = 0.0;
+                                    b.lastPocketDistSq = dSq;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Authentic Carrom Pool Pocket Sinking & Funnel Damping (libgame.so 0x1997f64 & 0x1998050)
+                for (auto& b : bodies) {
+                    if (b.inPocket || !b.inPocketDrop) continue;
+                    b.pocketDropTime += advanceDt;
+
+                    // Authentic rolling step damping inside pocket: 0.970000 per 1ms substep (0x1997f64)
+                    double stepDamp = std::pow(0.970000, advanceDt / 0.001);
+                    b.vx *= stepDamp;
+                    b.vy *= stepDamp;
+
+                    // Moving away check: if moving away from hole center, extra 0.850000 damping (0x1998050)
+                    double dx = b.pocketCenterX - b.px;
+                    double dy = b.pocketCenterY - b.py;
+                    double curDistSq = dx * dx + dy * dy;
+                    if (curDistSq > b.lastPocketDistSq) {
+                        double skidDamp = std::pow(0.850000, advanceDt / 0.001);
+                        b.vx *= skidDamp;
+                        b.vy *= skidDamp;
+                    }
+                    b.lastPocketDistSq = curDistSq;
+
+                    // Inward gravitational funnel suction (libgame.so 0x1B2CB14)
+                    double curDist = std::sqrt(curDistSq);
+                    if (curDist > 1e-4) {
+                        double pull = config.pocketGravity * 0.5 * advanceDt;
+                        b.vx += (dx / curDist) * pull;
+                        b.vy += (dy / curDist) * pull;
+                    }
+
+                    // Terminal capture condition (libgame.so 0x1998088 / 0x1998240):
+                    // When settled within 0.20 cm, or time >= 0.200s, or speed drops below minSpeed
+                    double spd = std::hypot(b.vx, b.vy);
+                    if (curDistSq <= 0.20 * 0.20 || b.pocketDropTime >= 0.200 || spd < minSpeed) {
+                        b.inPocket = true;
+                        b.inPocketDrop = false;
+                        b.px = b.pocketCenterX;
+                        b.py = b.pocketCenterY;
+                        b.vx = 0.0;
+                        b.vy = 0.0;
+                        b.wx = 0.0;
+                        b.wy = 0.0;
+                        b.wz = 0.0;
+
+                        TrajectorySegment seg;
+                        seg.startX = static_cast<float>(b.segStartX);
+                        seg.startY = static_cast<float>(b.segStartY);
+                        seg.endX   = static_cast<float>(b.px);
+                        seg.endY   = static_cast<float>(b.py);
+                        seg.isCushionBounce = (b.segments.size() > 0);
+                        seg.isPuckHit = false;
+                        b.segments.push_back(seg);
+                        b.segStartX = b.px;
+                        b.segStartY = b.py;
+                    }
+                }
+
+                // 3. Authentic Carrom Pool Ground Friction & Slip Solver (libgame.so 0x19986bc)
+                for (auto& b : bodies) {
+                    if (b.inPocket || b.inPocketDrop) continue;
+                    double curSpd = std::hypot(b.vx, b.vy);
+                    if (curSpd > minSpeed) {
+                        // Contact point slip velocity (libgame.so 0x1998700 & 0x1998704)
+                        // v_cx = vx + wy * R, v_cy = vy - wx * R
+                        double v_cx = b.vx + b.wy * b.radius;
+                        double v_cy = b.vy - b.wx * b.radius;
+                        double v_slip = std::hypot(v_cx, v_cy);
+
+                        // Time to stop slipping: t_slip = v_slip / 686.0 (libgame.so 0x1998718, where 1/686.0 = 0.0014577259475218659)
+                        double t_slip = v_slip * 0.0014577259475218659;
+                        double t_s = std::min(advanceDt, t_slip);
+
+                        if (v_slip > 1e-6 && t_s > 0.0) {
+                            // Slip deceleration impulse: 196.0 * t_s (libgame.so 0x1998744)
+                            double dv_slip = 196.0 * t_s;
+                            double slipRatio = dv_slip / v_slip;
+                            b.vx -= v_cx * slipRatio;
+                            b.vy -= v_cy * slipRatio;
+                            b.wx += (2.5 * v_cy * slipRatio) / b.radius;
+                            b.wy -= (2.5 * v_cx * slipRatio) / b.radius;
+                        }
+
+                        // Pure rolling Coulomb deceleration for remaining time (libgame.so 0x199878c - 0x19987d4)
+                        if (advanceDt > t_slip) {
+                            double dt_roll = advanceDt - t_slip;
+                            double spd = std::hypot(b.vx, b.vy);
+                            double mu = (b.id == -1) ? config.strikerFriction : config.puckFriction;
+                            if (mu < 0.0001) mu = 0.0001;
+                            double dv_roll = mu * 980.0 * dt_roll;
+                            if (spd <= dv_roll) {
+                                b.vx = 0.0;
+                                b.vy = 0.0;
+                                b.wx = 0.0;
+                                b.wy = 0.0;
+                            } else {
+                                double scale = (spd - dv_roll) / spd;
+                                b.vx *= scale;
+                                b.vy *= scale;
+                                b.wx = b.vy / b.radius;
+                                b.wy = -b.vx / b.radius;
+                            }
+                        }
+
+                        // Vertical spin decay: (mu / 5.0) * 980.0 * advanceDt (libgame.so 0x19987f4 - 0x199881c)
+                        if (std::abs(b.wz) > 1e-4) {
+                            double mu = (b.id == -1) ? config.strikerFriction : config.puckFriction;
+                            double dwz = (mu / 5.0) * 980.0 * advanceDt;
+                            if (std::abs(b.wz) <= dwz) {
+                                b.wz = 0.0;
+                            } else {
+                                b.wz -= std::copysign(dwz, b.wz);
+                            }
+                        }
+                        b.r_omega = std::hypot(b.vx, b.vy);
+                    } else {
+                        // Strict stationary cutoff enforcement (libgame.so minSpeed = 0.15 cm/s)
+                        b.vx = 0.0;
+                        b.vy = 0.0;
+                        b.wx = 0.0;
+                        b.wy = 0.0;
+                        b.wz = 0.0;
+                    }
+                }
+
+                // 3. Smooth Curving Trajectory Tracking
+                // When surface slip curves the direction by >= 1.0 deg and moved >= 3.5 cm, record intermediate vertex
+                for (auto& b : bodies) {
+                    if (b.inPocket) continue;
+                    double spd = std::hypot(b.vx, b.vy);
+                    if (spd > minSpeed) {
+                        double curAngle = std::atan2(b.vy, b.vx);
+                        double angleDiff = std::abs(curAngle - b.lastSegAngle);
+                        if (angleDiff > 3.141592653589793) angleDiff = 2.0 * 3.141592653589793 - angleDiff;
+                        double dSinceSeg = std::hypot(b.px - b.segStartX, b.py - b.segStartY);
+                        if (dSinceSeg >= 3.5 && angleDiff >= 0.017) {
+                            TrajectorySegment seg;
+                            seg.startX = static_cast<float>(b.segStartX);
+                            seg.startY = static_cast<float>(b.segStartY);
+                            seg.endX   = static_cast<float>(b.px);
+                            seg.endY   = static_cast<float>(b.py);
+                            seg.isCushionBounce = false;
+                            seg.isPuckHit = false;
+                            b.segments.push_back(seg);
+                            b.segStartX = b.px;
+                            b.segStartY = b.py;
+                            b.lastSegAngle = curAngle;
+                        }
+                    }
+                }
+            }
+
+            timeLeft -= advanceDt;
+
+            // -------------------------------------------------------------
+            // Resolve Collision Event
+            // -------------------------------------------------------------
+            if (eventType == 1) {
+                // Disc-to-disc contact (libgame.so 0x1998840)
+                auto& bi = bodies[eventI];
+                auto& bj = bodies[eventJ];
+                if (!bi.inPocket && !bj.inPocket) {
+                    double cdx = bi.px - bj.px;
+                    double cdy = bi.py - bj.py;
+                    double dist = std::hypot(cdx, cdy);
+                    double minDist = bi.radius + bj.radius;
+                    if (dist < 1e-6) {
+                        cdx = 1.0; cdy = 0.0; dist = 1e-6;
+                    }
+
+                    double nx = cdx / dist;
+                    double ny = cdy / dist;
+                    double theta = std::atan2(cdy, cdx);
+
+                    // 1. Authentic spin transfer for Body 1 (theta1 = -pi/2 - theta) (libgame.so 0x1998a8c)
+                    {
+                        double th1 = -1.5707963267948966 - theta;
+                        double cos1 = std::cos(th1);
+                        double sin1 = std::sin(th1);
+                        double v1t = bi.vx * cos1 - bi.vy * sin1;
+                        double v1n = bi.vx * sin1 + bi.vy * cos1;
+                        double v_slip1 = v1t - bi.wz * bi.radius;
+                        double sgn1 = (v_slip1 > 0.0) ? 1.0 : -1.0;
+                        double J1 = std::min(0.4 * std::abs(v1n), std::abs(v_slip1) / 2.5);
+                        bi.wz += (2.5 * J1 * sgn1) / bi.radius;
+                    }
+
+                    // Tangential spin transfer for Body 2 (theta2 = pi/2 - theta) (libgame.so 0x1998a8c)
+                    {
+                        double th2 = 1.5707963267948966 - theta;
+                        double cos2 = std::cos(th2);
+                        double sin2 = std::sin(th2);
+                        double v2t = bj.vx * cos2 - bj.vy * sin2;
+                        double v2n = bj.vx * sin2 + bj.vy * cos2;
+                        double v_slip2 = v2t - bj.wz * bj.radius;
+                        double sgn2 = (v_slip2 > 0.0) ? 1.0 : -1.0;
+                        double J2 = std::min(0.4 * std::abs(v2n), std::abs(v_slip2) / 2.5);
+                        bj.wz += (2.5 * J2 * sgn2) / bj.radius;
+                    }
+
+                    // 2. Overlap separation by exact inverse mass ratio (libgame.so 0x1998840 lines 57-69)
+                    double delta = minDist - dist;
+                    if (delta > 0.0) {
+                        double shift = delta / dist;
+                        double m1 = bi.mass;
+                        double m2 = bj.mass;
+                        double mSum = m1 + m2;
+                        bi.px += cdx * shift * (m2 / mSum);
+                        bi.py += cdy * shift * (m2 / mSum);
+                        bj.px -= cdx * shift * (m1 / mSum);
+                        bj.py -= cdy * shift * (m1 / mSum);
+                    }
+
+                    // 3. 1D Elastic Normal Velocity Exchange (libgame.so 0x1998840 lines 70-146)
+                    double spd1 = std::hypot(bi.vx, bi.vy);
+                    double spd2 = std::hypot(bj.vx, bj.vy);
+                    double alpha1 = std::atan2(bi.vy, bi.vx);
+                    double alpha2 = std::atan2(bj.vy, bj.vx);
+
+                    double u1n = spd1 * std::cos(alpha1 - theta);
+                    double u1t = spd1 * std::sin(alpha1 - theta);
+                    double u2n = spd2 * std::cos(alpha2 - theta);
+                    double u2t = spd2 * std::sin(alpha2 - theta);
+
+                    // Exchange normal momentum: RelNorm check (bi moving towards bj in normal frame)
+                    if (u1n - u2n < 1e-4) {
+                        double m1 = bi.mass;
+                        double m2 = bj.mass;
+                        double mSum = m1 + m2;
+                        double e = (config.restitutionBody > 0.0 && config.restitutionBody <= 1.0) ? config.restitutionBody : 1.00;
+
+                        double u1n_prime = (m1 * u1n + m2 * u2n - m2 * e * (u1n - u2n)) / mSum;
+                        double u2n_prime = (m1 * u1n + m2 * u2n + m1 * e * (u1n - u2n)) / mSum;
+
+                        // Authentic Carrom Pool libgame.so (0x1998840 lines 70-146):
+                        // Inter-disc linear collision is pure 1D normal momentum exchange.
+                        // Tangential velocities along the contact tangent are 100% preserved.
+                        double cosTh = std::cos(theta);
+                        double sinTh = std::sin(theta);
+
+                        bi.vx = u1n_prime * cosTh - u1t * sinTh;
+                        bi.vy = u1n_prime * sinTh + u1t * cosTh;
+
+                        bj.vx = u2n_prime * cosTh - u2t * sinTh;
+                        bj.vy = u2n_prime * sinTh + u2t * cosTh;
+
+                        bi.r_omega = std::hypot(bi.vx, bi.vy);
+                        bj.r_omega = std::hypot(bj.vx, bj.vy);
+
+                        // Authentic Carrom Pool equilibrium: align angular velocity with post-collision velocity
+                        // to prevent artificial gyroscopic slip curvature across subsequent sub-steps.
+                        bi.wx = bi.vy / bi.radius;
+                        bi.wy = -bi.vx / bi.radius;
+                        bj.wx = bj.vy / bj.radius;
+                        bj.wy = -bj.vx / bj.radius;
+
+                        bi.lastSegAngle = std::atan2(bi.vy, bi.vx);
+                        bj.lastSegAngle = std::atan2(bj.vy, bj.vx);
+                    }
+
+                    // Track impact speed and causality based on moving vs resting states
+                    if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
+                        // bi was moving and hit stationary bj
+                        bj.hitByEntityId = (bi.id == -1) ? 0 : bi.id;
+                        bj.hitSpeed = spd1;
+                    } else if (bj.chainLevel >= 0 && bi.chainLevel == -1) {
+                        // bj was moving and hit stationary bi
+                        bi.hitByEntityId = (bj.id == -1) ? 0 : bj.id;
+                        bi.hitSpeed = spd2;
+                    } else {
+                        // Both were moving (secondary collision)
+                        if (spd1 >= spd2) {
+                            if (bj.hitByEntityId == -1) {
+                                bj.hitByEntityId = (bi.id == -1) ? 0 : bi.id;
+                                bj.hitSpeed = spd1;
+                            }
+                        } else {
+                            if (bi.hitByEntityId == -1) {
+                                bi.hitByEntityId = (bj.id == -1) ? 0 : bj.id;
+                                bi.hitSpeed = spd2;
+                            }
+                        }
+                    }
+
+                        // Chain level assignment
+                        if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
+                            bj.chainLevel = bi.chainLevel + 1;
+                            if (bj.segments.empty()) {
+                                bj.segStartX = bj.px;
+                                bj.segStartY = bj.py;
+                            }
+                        } else if (bj.chainLevel >= 0 && bi.chainLevel == -1) {
+                            bi.chainLevel = bj.chainLevel + 1;
+                            if (bi.segments.empty()) {
+                                bi.segStartX = bi.px;
+                                bi.segStartY = bi.py;
+                            }
+                        }
+
+                        // Striker first impact record
+                        if (bi.id == -1 && !result.hasFirstContact) {
+                            result.hasFirstContact = true;
+                            result.firstImpactStrikerX = static_cast<float>(bi.px);
+                            result.firstImpactStrikerY = static_cast<float>(bi.py);
+                            result.firstImpactPuckX    = static_cast<float>(bj.px);
+                            result.firstImpactPuckY    = static_cast<float>(bj.py);
+                            result.firstContactPuckId  = bj.id;
+
+                            TrajectorySegment seg;
+                            seg.startX = static_cast<float>(bi.segStartX);
+                            seg.startY = static_cast<float>(bi.segStartY);
+                            seg.endX   = static_cast<float>(bi.px);
+                            seg.endY   = static_cast<float>(bi.py);
+                            seg.isCushionBounce = (bi.segments.size() > 0);
+                            seg.isPuckHit = true;
+                            bi.segments.push_back(seg);
+                            bi.segStartX = bi.px;
+                            bi.segStartY = bi.py;
+                        } else if (bi.id == -1) {
+                            TrajectorySegment seg;
+                            seg.startX = static_cast<float>(bi.segStartX);
+                            seg.startY = static_cast<float>(bi.segStartY);
+                            seg.endX   = static_cast<float>(bi.px);
+                            seg.endY   = static_cast<float>(bi.py);
+                            seg.isCushionBounce = false;
+                            seg.isPuckHit = true;
+                            bi.segments.push_back(seg);
+                            bi.segStartX = bi.px;
+                            bi.segStartY = bi.py;
+                        } else if (bi.chainLevel >= 1) {
+                            double distI = std::hypot(bi.px - bi.segStartX, bi.py - bi.segStartY);
+                            if (distI > 0.15) {
+                                TrajectorySegment seg;
+                                seg.startX = static_cast<float>(bi.segStartX);
+                                seg.startY = static_cast<float>(bi.segStartY);
+                                seg.endX   = static_cast<float>(bi.px);
+                                seg.endY   = static_cast<float>(bi.py);
+                                seg.isCushionBounce = false;
+                                seg.isPuckHit = true;
+                                bi.segments.push_back(seg);
+                                bi.segStartX = bi.px;
+                                bi.segStartY = bi.py;
+                            }
+                        }
+
+                        if (bj.chainLevel >= 1 && bj.id != -1) {
+                            double distJ = std::hypot(bj.px - bj.segStartX, bj.py - bj.segStartY);
+                            if (distJ > 0.15) {
+                                TrajectorySegment seg;
+                                seg.startX = static_cast<float>(bj.segStartX);
+                                seg.startY = static_cast<float>(bj.segStartY);
+                                seg.endX   = static_cast<float>(bj.px);
+                                seg.endY   = static_cast<float>(bj.py);
+                                seg.isCushionBounce = false;
+                                seg.isPuckHit = true;
+                                bj.segments.push_back(seg);
+                                bj.segStartX = bj.px;
+                                bj.segStartY = bj.py;
+                            }
+                        }
+                    }
+            } else if (eventType == 2) {
+                // Authentic cushion bounce with spin coupling (libgame.so 0x1998B2C)
+                auto& b = bodies[eventI];
+                if (!b.inPocket) {
+                    double thetaCushion = eventCushionNormalAngle;
+
+                    double cosTh = std::cos(thetaCushion);
+                    double sinTh = std::sin(thetaCushion);
+
+                    double vt = b.vx * cosTh - b.vy * sinTh;
+                    double vn = b.vx * sinTh + b.vy * cosTh;
+
+                    // Contact point tangential slip: v_slip = vt - wz * R (libgame.so 0x1998b90 FMSUB)
+                    double v_slip = vt - b.wz * b.radius;
+                    double sgnSlip = (v_slip > 0.0) ? 1.0 : -1.0;
+                    double Jt = std::min(0.4 * std::abs(vn), std::abs(v_slip) / 2.5);
+                    double delta_vt = -sgnSlip * Jt;
+
+                    // Authentic TableLogic + 0x1b0 table cushion damping (libgame.so 0x1998bc4 & 0x1998bcc)
+                    // vn_prime = -vn * e_body * e_cushion; vt_prime = vt + (delta_vt / 2.5)
+                    double e_body = (config.restitutionBody > 0.0) ? config.restitutionBody : 1.00;
+                    double vn_prime = -vn * e_body * config.restitutionCushion;
+                    double vt_prime = vt + (delta_vt / 2.5);
+                    b.wz -= (2.5 * delta_vt) / b.radius;
+
+                    // Rotated velocities back into world coordinates (libgame.so 0x1998c10 & 0x1998c14)
+                    b.vx = cosTh * vt_prime + sinTh * vn_prime;
+                    b.vy = cosTh * vn_prime - sinTh * vt_prime;
+
+                    // Authentic cushion angular momentum update & rolling equilibrium
+                    // Align surface angular velocity with post-rebound linear velocity to maintain pure rolling
+                    b.wx = b.vy / b.radius;
+                    b.wy = -b.vx / b.radius;
+
+                    b.r_omega = std::hypot(b.vx, b.vy);
+                    b.lastSegAngle = std::atan2(b.vy, b.vx);
+                    b.cushionBounces++;
+
+                    double dCush = std::hypot(b.px - b.segStartX, b.py - b.segStartY);
+                    if (dCush > 0.15) {
+                        TrajectorySegment seg;
+                        seg.startX = static_cast<float>(b.segStartX);
+                        seg.startY = static_cast<float>(b.segStartY);
+                        seg.endX   = static_cast<float>(b.px);
+                        seg.endY   = static_cast<float>(b.py);
+                        seg.isCushionBounce = true;
+                        seg.isPuckHit = false;
+                        b.segments.push_back(seg);
+                        b.segStartX = b.px;
+                        b.segStartY = b.py;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        // If timeLeft remains after subSteps, advance positions so physical simulation time never stalls in clusters
+        if (timeLeft > 1e-6) {
+            for (auto& b : bodies) {
+                if (b.inPocket) continue;
+                double spd = std::hypot(b.vx, b.vy);
+                if (spd > minSpeed) {
+                    b.px += b.vx * timeLeft;
+                    b.py += b.vy * timeLeft;
+                    b.distTraveled += spd * timeLeft;
+                }
+            }
+        }
+    }
+
+    // Finalize any bodies that settled in pocket drop funnel
+    for (auto& b : bodies) {
+        if (b.inPocketDrop) {
+            b.inPocket = true;
+            b.inPocketDrop = false;
+            b.px = b.pocketCenterX;
+            b.py = b.pocketCenterY;
+            b.vx = 0.0;
+            b.vy = 0.0;
+            TrajectorySegment seg;
+            seg.startX = static_cast<float>(b.segStartX);
+            seg.startY = static_cast<float>(b.segStartY);
+            seg.endX   = static_cast<float>(b.px);
+            seg.endY   = static_cast<float>(b.py);
+            seg.isCushionBounce = (b.segments.size() > 0);
+            seg.isPuckHit = false;
+            b.segments.push_back(seg);
+            b.segStartX = b.px;
+            b.segStartY = b.py;
+        }
+    }
+
+    // Finalize pending segments for bodies still in flight
+    for (auto& b : bodies) {
+        if (!b.inPocket) {
+            double d = std::hypot(b.px - b.segStartX, b.py - b.segStartY);
+            if ((b.id != -1 && b.chainLevel >= 1 && d > 0.01) || (b.segments.empty() && d > 0.15) || (!b.segments.empty() && d > 0.10)) {
+                TrajectorySegment seg;
+                seg.startX = static_cast<float>(b.segStartX);
+                seg.startY = static_cast<float>(b.segStartY);
+                seg.endX   = static_cast<float>(b.px);
+                seg.endY   = static_cast<float>(b.py);
+                seg.isCushionBounce = (b.segments.size() > 0);
+                seg.isPuckHit = (b.chainLevel >= 1 && b.segments.empty());
+                b.segments.push_back(seg);
+            }
+        }
+    }
+
+    const double boardLimit = config.boardHalfSize - 1.95; // Table cushion visual boundary (35.05 cm)
+
+    // Collect Striker results
+    result.segments = bodies[0].segments;
+    for (auto& s : result.segments) {
+        s.startX = static_cast<float>(std::clamp((double)s.startX, -boardLimit, boardLimit));
+        s.startY = static_cast<float>(std::clamp((double)s.startY, -boardLimit, boardLimit));
+        s.endX   = static_cast<float>(std::clamp((double)s.endX,   -boardLimit, boardLimit));
+        s.endY   = static_cast<float>(std::clamp((double)s.endY,   -boardLimit, boardLimit));
+    }
+    double stX = bodies[0].px;
+    double stY = bodies[0].py;
+    if (!bodies[0].inPocket) {
+        stX = std::clamp(stX, -boardLimit, boardLimit);
+        stY = std::clamp(stY, -boardLimit, boardLimit);
+    }
+    result.finalStrikerX = static_cast<float>(stX);
+    result.finalStrikerY = static_cast<float>(stY);
+    result.strikerInPocket = bodies[0].inPocket;
+    result.strikerPocketIndex = bodies[0].pocketIndex;
+    result.strikerCushionBounces = bodies[0].cushionBounces;
+    result.hitPuck = result.hasFirstContact;
+
+    // Collect Object Puck results (all pucks on table)
+    for (size_t i = 1; i < bodies.size(); i++) {
+        const auto& b = bodies[i];
+        PuckTrajectoryInfo traj;
+        traj.puckIndex = b.id;
+        traj.puckType = b.puckType;
+        traj.startX = static_cast<float>(b.initX);
+        traj.startY = static_cast<float>(b.initY);
+        double pkX = b.px;
+        double pkY = b.py;
+        if (!b.inPocket) {
+            pkX = std::clamp(pkX, -boardLimit, boardLimit);
+            pkY = std::clamp(pkY, -boardLimit, boardLimit);
+        }
+        traj.finalX = static_cast<float>(pkX);
+        traj.finalY = static_cast<float>(pkY);
+        traj.inPocket = b.inPocket;
+        traj.pocketIndex = b.pocketIndex;
+        traj.pocketCenterX = static_cast<float>(b.pocketCenterX);
+        traj.pocketCenterY = static_cast<float>(b.pocketCenterY);
+        traj.segments = b.segments;
+        traj.isHit = (b.chainLevel >= 1) || (b.hitByEntityId >= 0) || (std::hypot(traj.finalX - traj.startX, traj.finalY - traj.startY) > 0.02);
+        traj.hitByEntityId = b.hitByEntityId;
+        traj.hitSpeed = static_cast<float>(b.hitSpeed);
+        traj.cushionBounces = b.cushionBounces;
+        traj.hasDeflection = false;
+
+        if (traj.segments.empty() && (traj.isHit || traj.inPocket)) {
+            double dHit = std::hypot(traj.finalX - traj.startX, traj.finalY - traj.startY);
+            if (dHit > 0.01) {
+                TrajectorySegment seg;
+                seg.startX = traj.startX;
+                seg.startY = traj.startY;
+                seg.endX   = traj.finalX;
+                seg.endY   = traj.finalY;
+                seg.isCushionBounce = false;
+                seg.isPuckHit = true;
+                traj.segments.push_back(seg);
+            }
+        }
+        for (auto& s : traj.segments) {
+            s.startX = static_cast<float>(std::clamp((double)s.startX, -boardLimit, boardLimit));
+            s.startY = static_cast<float>(std::clamp((double)s.startY, -boardLimit, boardLimit));
+            s.endX   = static_cast<float>(std::clamp((double)s.endX,   -boardLimit, boardLimit));
+            s.endY   = static_cast<float>(std::clamp((double)s.endY,   -boardLimit, boardLimit));
+        }
+        result.puckTrajectories.push_back(traj);
+    }
+
+    if (s_diagnosticsEnabled) {
+        static int s_v2SimCounter = 0;
+        if (++s_v2SimCounter % 25 == 0 || result.hasFirstContact) {
+            logDiagnosticReport(result, startX, startY, shotAngle, forceVal);
+        }
+    }
+
+    return result;
+}
+
+void logDiagnosticReport(const SimResult& sim, double startX, double startY, double angle, double force) {
+    ALOGI("[CatEngine-V2] [SIM] Striker=(%.2f, %.2f) Angle=%.1f deg Force=%.2f | Segs=%zu FirstHit=%d PuckId=%d FirstImpact=(%.2f, %.2f) | Pucks=%zu Pocketed=%d",
+          startX, startY, angle * 180.0 / M_PI, force,
+          sim.segments.size(), sim.hasFirstContact ? 1 : 0, sim.firstContactPuckId,
+          sim.firstImpactStrikerX, sim.firstImpactStrikerY,
+          sim.puckTrajectories.size(), sim.strikerInPocket ? 1 : 0);
+    for (const auto& p : sim.puckTrajectories) {
+        if (p.inPocket) {
+            ALOGI("[CatEngine-V2] [POCKET-POT] Puck #%d (Type %d) potted into Pocket #%d (%.2f, %.2f)",
+                  p.puckIndex, p.puckType, p.pocketIndex, p.pocketCenterX, p.pocketCenterY);
+        }
+    }
+}
+
+} // namespace v2
+} // namespace catengine

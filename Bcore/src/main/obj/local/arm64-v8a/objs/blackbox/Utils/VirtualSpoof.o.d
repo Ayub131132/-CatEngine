@@ -1,0 +1,6 @@
+C:/Users/ayubg/AndroidStudioProjects/NewBlackbox-main1/NewBlackbox-main/Bcore/src/main/obj/local/arm64-v8a/objs/blackbox/Utils/VirtualSpoof.o: \
+  C:/Users/ayubg/AndroidStudioProjects/NewBlackbox-main1/NewBlackbox-main/Bcore/src/main/cpp/Utils/VirtualSpoof.cpp \
+  C:/Users/ayubg/AndroidStudioProjects/NewBlackbox-main1/NewBlackbox-main/Bcore/src/main/cpp/./xdl.h \
+  C:/Users/ayubg/AndroidStudioProjects/NewBlackbox-main1/NewBlackbox-main/Bcore/src/main/cpp/Dobby/dobby.h
+C:/Users/ayubg/AndroidStudioProjects/NewBlackbox-main1/NewBlackbox-main/Bcore/src/main/cpp/./xdl.h:
+C:/Users/ayubg/AndroidStudioProjects/NewBlackbox-main1/NewBlackbox-main/Bcore/src/main/cpp/Dobby/dobby.h:
