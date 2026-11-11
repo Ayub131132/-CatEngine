@@ -28,3 +28,19 @@ All notable changes to the CatEngine project are documented in this file.
   - Extracted live game library `libgame-CARROM-GooglePlay-Gold-Release-Module-1491.so` (SHA-256: `4CF2BA474FC9AEFDA142FBDCA46CF7B4D3EBF06A2114ECD8487A3E48448710B4`).
   - Verified function prologues and float coordinate signatures for all CatEngine native hooks in `catEngine.cpp` using `llvm-objdump`.
 
+### Critical Bug Fixes, UI Uncluttering & Recommendation Engine Repair
+- **Turn & Opponent Isolation:**
+  - Prevented opponent's top baseline from falsely triggering local turn readiness.
+  - Added strict opponent turn gating (`s_isOpponentTurn`); paused auto-shot and cleared predictions during opponent turn.
+- **Target Coin Color Customization:**
+  - Added `TargetColorMode` (Auto, White Only, Black Only, Any Coin) enabling full support for Black player assignment, Disc Pool, and Freestyle.
+- **Scratch Foul Protection:**
+  - Striker entering a pocket is now properly identified as a Foul (Crimson Warning Red highlight on pocket, red trajectory, candidate disqualified).
+- **Non-Obstructive UI Overlay:**
+  - Reduced guideline thickness to sleek 0.20cm hairline.
+  - Eliminated solid filled circles over table pucks, rendering only a delicate ring on the designated target coin.
+  - Removed opaque green blobs covering pocket holes.
+- **Settings Screen Responsiveness:**
+  - Added debounced slider persistence with local state to eliminate Compose UI thread stutter.
+  - Integrated 4-button Target Coin Filter selector directly in Settings.
+

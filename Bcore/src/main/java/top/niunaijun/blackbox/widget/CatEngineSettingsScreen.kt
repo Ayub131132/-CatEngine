@@ -80,8 +80,8 @@ fun CatEngineSettingsScreen(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Section 1: Main Toggles & Switches
-                SectionTitle(title = "Aiming & Display Switches")
+                // Section 1: Aiming & Prediction
+                SectionTitle(title = "Aiming & Prediction")
 
                 // Show Prediction switch (Default ON)
                 SettingSwitchRow(
@@ -90,16 +90,22 @@ fun CatEngineSettingsScreen(
                     onCheckedChange = { CatEngineConfig.updateShowPrediction(context, it) }
                 )
 
+                // Target Coin Filter (Auto, White, Black, Any)
+                TargetColorModeSelector(
+                    selectedMode = CatEngineConfig.targetColorMode,
+                    onModeSelected = { CatEngineConfig.updateTargetColorMode(context, it) }
+                )
+
                 // Show Pocket switch
                 SettingSwitchRow(
-                    title = "Show Pocket",
+                    title = "Show Pocket Guides",
                     checked = CatEngineConfig.showPocket,
                     onCheckedChange = { CatEngineConfig.updateShowPocket(context, it) }
                 )
 
                 // Show Table switch
                 SettingSwitchRow(
-                    title = "Show Table",
+                    title = "Show Table Border",
                     checked = CatEngineConfig.showTable,
                     onCheckedChange = { CatEngineConfig.updateShowTable(context, it) }
                 )
@@ -357,10 +363,12 @@ private fun SettingSliderRow(
     displayValue: String,
     onValueChange: (Float) -> Unit
 ) {
+    var localPos by remember(value) { mutableFloatStateOf(value) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp)
+            .padding(vertical = 4.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -370,7 +378,7 @@ private fun SettingSliderRow(
             Text(
                 text = title,
                 color = TextPrimary,
-                fontSize = 15.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Medium
             )
 
@@ -383,9 +391,9 @@ private fun SettingSliderRow(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = displayValue,
+                    text = "${localPos.roundToInt()}",
                     color = AccentBlue,
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -394,8 +402,9 @@ private fun SettingSliderRow(
         Spacer(modifier = Modifier.height(2.dp))
 
         Slider(
-            value = value,
-            onValueChange = onValueChange,
+            value = localPos,
+            onValueChange = { localPos = it },
+            onValueChangeFinished = { onValueChange(localPos) },
             valueRange = valueRange,
             steps = steps,
             colors = SliderDefaults.colors(
@@ -405,6 +414,61 @@ private fun SettingSliderRow(
             ),
             modifier = Modifier.fillMaxWidth()
         )
+    }
+}
+
+@Composable
+private fun TargetColorModeSelector(
+    selectedMode: Int,
+    onModeSelected: (Int) -> Unit
+) {
+    val modes = listOf(
+        0 to "Auto",
+        1 to "White",
+        2 to "Black",
+        3 to "Any Coin"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        Text(
+            text = "Target Coin Filter",
+            color = TextPrimary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            modes.forEach { (modeId, label) ->
+                val isSelected = (selectedMode == modeId)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) AccentBlue else Color(0xFF1E2235))
+                        .border(
+                            BorderStroke(1.dp, if (isSelected) AccentBlue else Color(0xFF282C40)),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onModeSelected(modeId) }
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        color = if (isSelected) Color(0xFF0F111D) else TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
     }
 }
 

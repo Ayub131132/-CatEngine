@@ -122,6 +122,10 @@ public class NativeCore {
 
     public static native int getPhysicsEngineMode();
 
+    public static native void setTargetColorMode(int mode);
+
+    public static native int getTargetColorMode();
+
     public static native void applyEngineOffsets(String jsonOffsets);
 
 

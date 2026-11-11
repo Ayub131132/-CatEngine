@@ -319,6 +319,14 @@ jint getPhysicsEngineMode(JNIEnv *env, jclass clazz) {
     return (jint) GraphicsEngine_GetPhysicsEngineMode();
 }
 
+void setTargetColorMode(JNIEnv *env, jclass clazz, jint mode) {
+    GraphicsEngine_SetTargetColorMode((int) mode);
+}
+
+jint getTargetColorMode(JNIEnv *env, jclass clazz) {
+    return (jint) GraphicsEngine_GetTargetColorMode();
+}
+
 void applyEngineOffsets(JNIEnv *env, jclass clazz, jstring jsonOffsets) {
     if (!jsonOffsets) return;
     const char *nativeStr = env->GetStringUTFChars(jsonOffsets, JNI_FALSE);
@@ -374,6 +382,8 @@ static JNINativeMethod gMethods[] = {
         {"getKeepLineAfterShot","()Z",                             (void *) getKeepLineAfterShot},
         {"setPhysicsEngineMode", "(I)V",                           (void *) setPhysicsEngineMode},
         {"getPhysicsEngineMode", "()I",                            (void *) getPhysicsEngineMode},
+        {"setTargetColorMode",   "(I)V",                           (void *) setTargetColorMode},
+        {"getTargetColorMode",   "()I",                            (void *) getTargetColorMode},
         {"applyEngineOffsets", "(Ljava/lang/String;)V",           (void *) applyEngineOffsets},
 };
 

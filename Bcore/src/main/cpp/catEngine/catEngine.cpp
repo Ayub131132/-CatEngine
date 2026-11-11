@@ -354,6 +354,7 @@ static void* s_capturedShotDelegate = nullptr;
 static uintptr_t s_knownControlsVtable = 0;
 static std::atomic<bool> s_isInEngineAimActive(false);
 static std::atomic<bool> s_isLocalTurnReady(false);
+static std::atomic<bool> s_isOpponentTurn(false);
 static std::atomic<int>  s_localBaselineId(0);
 static std::atomic<int>  s_lastPlayerIndex(0);
 static int s_queenPuckId = -1;
@@ -3080,6 +3081,7 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
     // Turn is guaranteed to be local player's turn when setupLocalStrikerBar is invoked!
     g_matchActive.store(true);
     setGraphicsMatchActive(true);
+    s_isOpponentTurn.store(false);
     s_isLocalTurnReady.store(true);
     s_lastShotTimeMs.store(0);
     GraphicsEngine_OnStrikerReturnedToBaseline();
@@ -3098,8 +3100,10 @@ typedef void (*setupOpponentStrikerBar_fn)(void* self, void* sel);
 static setupOpponentStrikerBar_fn orig_setupOpponentStrikerBar = nullptr;
 
 static void my_setupOpponentStrikerBar(void* self, void* sel) {
+    s_isOpponentTurn.store(true);
     s_isLocalTurnReady.store(false);
     GraphicsEngine_ResetTurnScanTimer();
+    GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
     ALOGI("[GAME EVENT] >>> OPPONENT TURN STARTED (setupOpponentStrikerBar)! Auto-Shot paused. <<<");
     if (self) {
         s_capturedGameplayView = self;
@@ -3304,17 +3308,28 @@ static void startAutoShotWorker() {
             }
 
             // 4. Is it local player's turn?
+            if (s_isOpponentTurn.load()) {
+                if (shouldLogStatus) {
+                    s_lastAutoLogMs = nowMs;
+                    ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Opponent turn active (setupOpponentStrikerBar).");
+                }
+                stationaryStreak = 0;
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                continue;
+            }
+
             if (!s_isLocalTurnReady.load()) {
                 MCPointDouble curSt = sampleStrikerPosition();
-                if (isValidBaselineY(curSt.y)) {
+                // Strictly local bottom baseline (Y < -15.0 and Y > -35.0). Opponent top baseline is Y > +15.0!
+                if (curSt.y < -15.0 && curSt.y > -35.0) {
                     s_isLocalTurnReady.store(true);
                 } else {
                     if (shouldLogStatus) {
                         s_lastAutoLogMs = nowMs;
-                        ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Not local player's turn.");
+                        ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Local striker not in bottom baseline (Y=%.2f).", curSt.y);
                     }
                     stationaryStreak = 0;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
                     continue;
                 }
             }
@@ -3345,12 +3360,12 @@ static void startAutoShotWorker() {
                 continue;
             }
 
-            // 7. Check striker position - must be on local baseline
+            // 7. Check striker position - must be on local bottom baseline
             MCPointDouble curStriker = sampleStrikerPosition();
-            if (!isValidBaselineY(curStriker.y)) {
+            if (curStriker.y >= -15.0 || curStriker.y <= -35.0) {
                 if (shouldLogStatus) {
                     s_lastAutoLogMs = nowMs;
-                    ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Striker not on baseline yet.");
+                    ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Striker not on local bottom baseline (Y=%.2f).", curStriker.y);
                 }
                 stationaryStreak = 0;
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));

@@ -178,6 +178,7 @@ static std::atomic<double> s_scanLiveY(0.0);
 static std::atomic<double> s_scanLiveAngle(0.0);
 static std::atomic<bool>   s_isActivelySearching(false);
 static std::atomic<int64_t> s_shotReleasedTimeMs(0);
+static std::atomic<int>    s_targetColorMode(0); // 0 = Auto, 1 = White Only, 2 = Black Only, 3 = Any Puck
 
 extern "C" bool CatEngine_GetLiveStrikerPos(double* outX, double* outY);
 
@@ -1681,7 +1682,7 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         drawTableRing(tableMVP, feather, bMaxX, oppY, 1.55f, 0.26f, 1.0f, 0.4f, 0.2f, 0.90f);
 
         float baseThickness = s_guidelineThickness.load();
-        if (baseThickness < 0.45f) baseThickness = 0.60f; // Crisp, high-contrast bold guideline
+        if (baseThickness < 0.10f || baseThickness > 0.40f) baseThickness = 0.20f; // Sleek, non-obstructive hairline guideline
         float stRadius      = s_strikerRadius.load();
         float pkRadius      = s_puckRadius.load();
 
@@ -1769,9 +1770,10 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
 
         // Determine which pocket(s) are targeted by potted pucks (or striker scratch)
         bool pocketPotted[4] = { false, false, false, false };
+        bool pocketScratched[4] = { false, false, false, false };
         if (hasSim) {
             if (sim.strikerInPocket && sim.strikerPocketIndex >= 0 && sim.strikerPocketIndex < 4) {
-                pocketPotted[sim.strikerPocketIndex] = true;
+                pocketScratched[sim.strikerPocketIndex] = true;
             }
             if (sim.hitPuck) {
                 for (const auto& traj : sim.puckTrajectories) {
@@ -1791,38 +1793,36 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             { -pkInset, -pkInset }
         };
 
-        // Render the 4 Corner Pocket Detection Circles (transparent fill + distinct ring border)
+        // Render the 4 Corner Pocket Detection Guides (clean, unobtrusive wireframe)
         if (s_showPocket.load()) {
             for (int p = 0; p < 4; p++) {
                 float pcx = pocketCenters[p][0];
                 float pcy = pocketCenters[p][1];
-                if (pocketPotted[p]) {
-                    // Targeted pot pocket: Highlight with Electric Neon Emerald (#00FF66)!
-                    drawTableCircle(tableMVP, feather, pcx, pcy, pkRad, kPotColor.r, kPotColor.g, kPotColor.b, 0.35f * lineAlpha);
-                    drawTableRing(tableMVP, feather, pcx, pcy, pkRad, std::max(0.0f, pkRad - 0.28f), kPotColor.r, kPotColor.g, kPotColor.b, 1.0f * lineAlpha);
+                if (pocketScratched[p]) {
+                    // STRIKER SCRATCH FOUL! Highlight with Crimson Warning Red (#FF2222)
+                    drawTableCircle(tableMVP, feather, pcx, pcy, pkRad, 1.0f, 0.15f, 0.15f, 0.30f * lineAlpha);
+                    drawTableRing(tableMVP, feather, pcx, pcy, pkRad, std::max(0.0f, pkRad - 0.22f), 1.0f, 0.20f, 0.20f, 0.95f * lineAlpha);
+                } else if (pocketPotted[p]) {
+                    // Legitimate Puck Pot: Subtle Emerald Green
+                    drawTableCircle(tableMVP, feather, pcx, pcy, pkRad, kPotColor.r, kPotColor.g, kPotColor.b, 0.20f * lineAlpha);
+                    drawTableRing(tableMVP, feather, pcx, pcy, pkRad, std::max(0.0f, pkRad - 0.22f), kPotColor.r, kPotColor.g, kPotColor.b, 0.85f * lineAlpha);
                 } else {
-                    // Idle pocket: Subtle translucent cyan fill with crisp border
-                    drawTableCircle(tableMVP, feather, pcx, pcy, pkRad, 0.00f, 0.85f, 1.00f, 0.12f * lineAlpha);
-                    drawTableRing(tableMVP, feather, pcx, pcy, pkRad, std::max(0.0f, pkRad - 0.18f), 0.00f, 0.85f, 1.00f, 0.70f * lineAlpha);
+                    // Idle pocket: Very subtle translucent cyan ring (never obstructs hole)
+                    drawTableRing(tableMVP, feather, pcx, pcy, pkRad, std::max(0.0f, pkRad - 0.12f), 0.00f, 0.85f, 1.00f, 0.35f * lineAlpha);
                 }
             }
         }
 
-        // Render Circles Over All Active Table Pucks (User requested: "where is the circle over the puck?")
-        {
+        // Render subtle ring ONLY on the target puck being aimed at (never obscure coins with filled discs)
+        if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0) {
             std::lock_guard<std::mutex> lock(s_puckMutex);
             for (const auto& pe : s_puckList) {
-                if (!pe.active) continue;
-                if (isPuckPottedOrInvalid(pe.x, pe.y, pkInset, pkRad)) continue;
-
-                BodyColor col = getEntityColor(pe.id, pe.puckType);
-
-                // Draw filled inner disc with translucency
-                drawTableCircle(tableMVP, feather, pe.x, pe.y, pkRadius, col.r, col.g, col.b, 0.40f * lineAlpha);
-
-                // Draw crisp, bright outer ring to clearly mark puck hitbox
-                float innerR = std::max(0.0f, pkRadius - 0.22f);
-                drawTableRing(tableMVP, feather, pe.x, pe.y, pkRadius, innerR, col.r, col.g, col.b, 0.95f * lineAlpha);
+                if (pe.id == sim.firstContactPuckId && pe.active && !isPuckPottedOrInvalid(pe.x, pe.y, pkInset, pkRad)) {
+                    BodyColor col = getEntityColor(pe.id, pe.puckType);
+                    float innerR = std::max(0.0f, pkRadius - 0.12f);
+                    drawTableRing(tableMVP, feather, pe.x, pe.y, pkRadius, innerR, col.r, col.g, col.b, 0.70f * lineAlpha);
+                    break;
+                }
             }
         }
 
@@ -1842,6 +1842,10 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         }
 
         if (hasSim && s_showPrediction.load()) {
+            if (sim.strikerInPocket) {
+                // Warning Red line for scratch foul!
+                stColor = { 1.0f, 0.18f, 0.18f, 1.0f };
+            }
             // Guarantee at least one forward segment so the guideline is NEVER invisible!
             if (sim.segments.empty()) {
                 double endX = sim.finalStrikerX;
@@ -1899,14 +1903,12 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                     }
 
                     if (traj.inPocket) {
-                        // Pocket landing circle: Glowing Neon Emerald with outer ring!
-                        drawTableCircle(tableMVP, feather, traj.finalX, traj.finalY,
-                                        pkRadius * 1.15f, kPotColor.r, kPotColor.g, kPotColor.b, 1.0f * lineAlpha);
+                        // Pocket landing: Subtle wireframe ring, never an opaque blob covering the hole
                         drawTableRing(tableMVP, feather, traj.finalX, traj.finalY,
-                                      pkRadius * 1.35f, pkRadius * 1.15f, kPotColor.r, kPotColor.g, kPotColor.b, 0.85f * lineAlpha);
+                                      pkRadius * 1.15f, pkRadius * 0.95f, kPotColor.r, kPotColor.g, kPotColor.b, 0.75f * lineAlpha);
                     } else if (traj.isHit || !traj.segments.empty()) {
-                        drawTableCircle(tableMVP, feather, traj.finalX, traj.finalY,
-                                        pkRadius, pkColor.r, pkColor.g, pkColor.b, pkColor.a * lineAlpha);
+                        drawTableRing(tableMVP, feather, traj.finalX, traj.finalY,
+                                      pkRadius, std::max(0.0f, pkRadius - 0.12f), pkColor.r, pkColor.g, pkColor.b, 0.65f * lineAlpha);
                     }
                 }
             }
@@ -2613,6 +2615,15 @@ bool GraphicsEngine_IsFastFirstShotMode() {
     return s_fastFirstShotMode.load();
 }
 
+void GraphicsEngine_SetTargetColorMode(int mode) {
+    s_targetColorMode.store(mode);
+    ALOGI("[GRAPHICS ENGINE] Target Color Mode set to %d (0=Auto, 1=White, 2=Black, 3=Any)", mode);
+}
+
+int GraphicsEngine_GetTargetColorMode() {
+    return s_targetColorMode.load();
+}
+
 // =========================================================================================
 // AUTO-STRIKE COMBINATION SEARCH CONTROLLER (HIGH-SPEED DYNAMIC BASELINE & ALL-ANGLE SCANNER)
 // =========================================================================================
@@ -2706,8 +2717,23 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
     for (const auto& traj : sim.puckTrajectories) {
         if (!traj.inPocket) continue;
 
-        // Opponent black pucks must NEVER be targeted or potted by auto-shot
-        if (traj.puckType == 2) {
+        // Target Puck Color Filter (0=Auto, 1=White Only, 2=Black Only, 3=Any/Disc Pool/Points)
+        int mode = s_targetColorMode.load();
+        bool isPuckAllowed = false;
+        if (traj.puckType == 3) {
+            isPuckAllowed = true; // Queen is always a valid scoring target
+        } else if (mode == 1) {
+            isPuckAllowed = (traj.puckType == 1); // White only
+        } else if (mode == 2) {
+            isPuckAllowed = (traj.puckType == 2); // Black only
+        } else if (mode == 3) {
+            isPuckAllowed = true; // Any puck (Freestyle / Disc Pool)
+        } else {
+            // Auto mode: Allow White (1) or Black (2) based on active board targets
+            isPuckAllowed = (traj.puckType == 1 || traj.puckType == 2);
+        }
+
+        if (!isPuckAllowed) {
             continue;
         }
 
@@ -2894,11 +2920,17 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
 
     s_isActivelySearching.store(true);
 
-    bool hasPlayerPucks = (countWhite > 0);
+    int targetMode = s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any/Disc Pool
     auto isTargetAllowed = [&](int puckType) -> bool {
         if (puckType == 3) return true; // Queen always targetable
-        if (hasPlayerPucks) return (puckType == 1); // White pucks first
-        return true; // When white cleared or in freestyle, all pucks targetable
+        if (targetMode == 1) return (puckType == 1); // White only
+        if (targetMode == 2) return (puckType == 2); // Black only
+        if (targetMode == 3) return true; // Any puck (Freestyle / Disc Pool)
+        // Auto mode (0):
+        if (countWhite > 0 && countBlack > 0) return true;
+        if (countWhite > 0) return (puckType == 1);
+        if (countBlack > 0) return (puckType == 2);
+        return true;
     };
 
     const double pocketCenters[4][2] = {
