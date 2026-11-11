@@ -104,6 +104,8 @@
 | Nov 11 13:13 | Phase 8 | Device Installation on Vivo T3 Lite | `adb install -r -d` | SUCCESS (Streamed install) |
 | Nov 11 13:14 | Phase 8 | Live Activity & Native Hook Telemetry | Logcat audit (PID 30546) | 8/8 Hooks verified, GLES Shaders initialized |
 | Nov 11 13:16 | Phase 8 | In-Container Carrom Launch | `dumpsys window` focus audit | `CarromActivity` loaded via `ProxyActivity$P0` |
+| Nov 11 13:42 | Phase 9 | Turn Detection & Color Repair | Native hooks & GLES rebuild | Auto/White/Black/Any modes added, scratch foul warning |
+| Nov 11 13:44 | Phase 9 | UI Clean & Performance Polish | Streamed APK install (PID 14078) | Hairline guidelines, no covered coins, debounced settings |
 | Nov 11 12:38 | Phase 1 | Created branch `feature/catengine-complete-implementation` | `git status` | Clean branch established |
 | Nov 11 12:43 | Phase 0 | Reorganized docs, tools, .gitignore, README | `git commit` (ddc3ea0) | Clean repository commit |
 | Nov 11 12:47 | Phase 6 | Authored `tests/physics/test_physics_engine.cpp` | `test_physics_engine.exe` | 7/7 PASSED (100%) |
