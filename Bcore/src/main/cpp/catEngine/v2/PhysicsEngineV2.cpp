@@ -1,17 +1,28 @@
+#define _USE_MATH_DEFINES
 #include "PhysicsEngineV2.h"
 #include <cmath>
 #include <vector>
 #include <algorithm>
-#include <android/log.h>
 #include <chrono>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#ifdef __ANDROID__
+#include <android/log.h>
 #ifndef LOG_TAG
 #define LOG_TAG "CatEngine-V2"
 #endif
-
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#else
+#include <cstdio>
+#define ALOGI(...) do { printf("[INFO] " __VA_ARGS__); printf("\n"); } while(0)
+#define ALOGW(...) do { printf("[WARN] " __VA_ARGS__); printf("\n"); } while(0)
+#define ALOGE(...) do { fprintf(stderr, "[ERROR] " __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#endif
 
 namespace catengine {
 namespace v2 {

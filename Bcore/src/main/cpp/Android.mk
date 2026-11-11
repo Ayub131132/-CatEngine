@@ -45,7 +45,8 @@ Hook/BaseHook.cpp \
 JniHook/JniHook.cpp \
 catEngine/catEngine.cpp \
 catEngine/GraphicsEngine.cpp \
-catEngine/v2/PhysicsEngineV2.cpp
+catEngine/v2/PhysicsEngineV2.cpp \
+catEngine/cv/BoardDetectionEngine.cpp
 
 LOCAL_C_INCLUDES += $(LOCAL_PATH)
 LOCAL_CFLAGS += -Wno-error=format-security -fvisibility=hidden -ffunction-sections -fdata-sections -w -std=c++17
