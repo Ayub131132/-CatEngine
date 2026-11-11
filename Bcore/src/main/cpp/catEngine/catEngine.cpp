@@ -3063,7 +3063,7 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
     }
     g_matchActive.store(true);
     setGraphicsMatchActive(true);
-    s_queenPuckId = -1;
+    // Note: Do NOT reset s_queenPuckId on each turn! Queen retains its identity throughout the entire match.
     int localB = s_localBaselineId.load();
     s_lastPlayerIndex.store((localB >= 0) ? localB : 0);
     g_baselineDiscovered.store(false);

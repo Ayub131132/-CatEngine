@@ -1812,12 +1812,11 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             if (effectiveColor == 0 || effectiveColor == 4) {
                 effectiveColor = s_autoDetectedColor.load(); // Dynamic real-time auto detection
             }
-            if (effectiveColor == 0) {
-                // If undecided at match start before first pot, infer from active baseline
-                effectiveColor = (curY > 0.0) ? 2 : 1;
-            }
 
-            if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0) {
+            // Only mark target as illegal IF player has an established/locked color rule!
+            // When effectiveColor == 0 (fresh game before first pot or undecided),
+            // both White and Black are legal choices to strike!
+            if (effectiveColor != 0 && hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0) {
                 std::lock_guard<std::mutex> lock(s_puckMutex);
                 for (const auto& pe : s_puckList) {
                     if (pe.id == sim.firstContactPuckId) {
@@ -3023,9 +3022,6 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
     if (effectiveColor == 0 || effectiveColor == 4) {
         effectiveColor = s_autoDetectedColor.load();
     }
-    if (effectiveColor == 0 && targetMode != 3 && matchPlayers != 3) {
-        effectiveColor = isTopBaseline ? 2 : 1;
-    }
     auto isTargetAllowed = [&](int puckType) -> bool {
         if (puckType == 3) return true; // Queen always targetable
         if (targetMode == 3 || matchPlayers == 3) return true; // Any coin in Disc Pool or 3-player
@@ -3033,7 +3029,7 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
         if (effectiveColor == 2) return (puckType == 2); // Black only
         if (countWhite > 0 && countBlack == 0) return (puckType == 1);
         if (countBlack > 0 && countWhite == 0) return (puckType == 2);
-        return true;
+        return true; // If effectiveColor == 0 (undecided), both colors are allowed!
     };
 
     const double pocketCenters[4][2] = {
