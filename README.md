@@ -3,27 +3,24 @@
 [![Platform](https://img.shields.io/badge/Platform-Android%208.0+-green.svg)](https://android.com)
 [![Architecture](https://img.shields.io/badge/Architecture-ARM64--v8a%20%7C%20ARMeabi--v7a-blue.svg)]()
 [![NDK](https://img.shields.io/badge/NDK-28.2.13676358-orange.svg)]()
+[![Standard](https://img.shields.io/badge/C%2B%2B-C%2B%2B20-purple.svg)]()
 [![Page Size](https://img.shields.io/badge/Android%2015-16KB%20Aligned-success.svg)]()
 [![License](https://img.shields.io/badge/License-Apache%202.0-lightgrey.svg)](LICENSE)
 
-CatEngine is a high-performance Android virtualization platform and deterministic 2D game physics simulation and prediction system. Built on a modernized, user-space virtual process container (**BlackBox Core**), CatEngine enables in-process game introspection, low-latency OpenGL ES predictive trajectory rendering, and authorized test automation without requiring Android root privileges or external hardware.
-
-<p align="center">
-  <img src="assets/usage.gif" alt="CatEngine Overview" width="90%"/>
-</p>
+CatEngine is an enterprise-grade Android user-space virtualization platform, real-time computer vision table analyzer, and deterministic 2D game physics simulation engine. Built upon a modernized virtual process container (**BlackBox Core**), CatEngine enables in-process game introspection, sub-millisecond predictive trajectory forecasting, and authorized automated test verification without requiring Android root privileges, kernel modifications, or external hardware accessories.
 
 ---
 
-## Architecture & System Overview
+## System Architecture
 
-CatEngine operates an in-process virtualization model where target applications are isolated within a sandbox process (`:p0`). The application interacts with system services via proxied Android IPC, while native engine hooks intercept graphics rendering and physics events for accurate trajectory forecasting.
+CatEngine operates an in-process virtualization architecture where target applications are hosted inside an isolated user-space sandbox process (`:p0`). The application interacts with system services via proxied Android IPC, while native engine hooks intercept graphics rendering and physics events for accurate trajectory forecasting.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        CatEngine Host App (:app)                       │
-│  - Jetpack Compose Material 3 UI                                       │
-│  - BlackBox Virtualization Manager & Package Installer                 │
-│  - Board Calibration & Trajectory Visual Customization Overlay         │
+│  - Jetpack Compose Material 3 Management Dashboard                    │
+│  - BlackBox Virtualization Manager & Multi-Package Installer           │
+│  - Real-time Match Telemetry, State Inspector & Rule Monitor           │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ Launches in Sandbox
                                     ▼
@@ -32,8 +29,8 @@ CatEngine operates an in-process virtualization model where target applications 
 │                                                                        │
 │   ┌────────────────────────────────────────────────────────────────┐   │
 │   │                    Target App (Carrom Pool)                    │   │
-│   │  - Cocos2d-x Engine / Dalvik-ART Runtime                       │   │
-│   │  - libgame.so (AArch64 Native Game & Table Logic)              │   │
+│   │  - Cocos2d-x Engine / Dalvik-ART Native Runtime                │   │
+│   │  - libgame.so (AArch64 Native Game, Table & Motion Logic)      │   │
 │   └───────────────────────────────┬────────────────────────────────┘   │
 │                                   │ In-Process Shared Virtual Memory   │
 │                                   ▼                                    │
@@ -42,27 +39,42 @@ CatEngine operates an in-process virtualization model where target applications 
 │   │  - BlackBox Core (IO, Binder, System Call Redirection)         │   │
 │   │  - Dobby Inline Hook & xDL Linker Symbol Resolution            │   │
 │   │  - GLES eglSwapBuffers Interception & Trajectory Drawing       │   │
-│   │  - PhysicsEngineV2: 1000 Hz Continuous Collision Detection     │   │
+│   │  - PhysicsEngineV2: 1000 Hz CCD & Sequential Impulse Solver    │   │
+│   │  - AdaptiveLearningEngine: Online Reinforcement Parameter AI   │   │
+│   │  - BoardDetectionEngine: Sub-pixel OpenCV Feature Extraction   │   │
 │   └────────────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Key Features
+## Core Innovations & Capabilities
 
-1. **Rootless Virtual Container**:
-   Runs commercial Android applications in user-space sandbox processes without root permissions, kernel patches, or system modifications.
-2. **Android 15 & 16KB Page-Size Compliant**:
-   Native binaries (`libengine.so`) are linked with `-z,max-page-size=16384` (`0x4000` alignment), fully satisfying Android 15 compatibility requirements on modern ARM64 chips.
-3. **Deterministic 2D Physics Simulator (`PhysicsEngineV2`)**:
-   - Microsecond-accurate continuous collision detection (CCD) resolving disc-to-disc and disc-to-cushion rebounds.
-   - Dynamic Coulomb friction model with authentic slip-to-roll transitions ($\mu \approx 0.160$ sliding, $\mu \approx 0.108$ rolling).
-   - Gravitational funnel attraction modeling within corner pocket capture radii ($980.0\text{ cm/s}^2$).
-4. **Unified Prediction Pipeline**:
-   Trajectory visualizers and shot-selection solvers share the exact same physics engine, eliminating divergence between rendered lines and physical coin paths.
-5. **Zero-Latency In-Game Overlay**:
-   Intercepts OpenGL ES display frames (`eglSwapBuffers`) via Dobby, rendering laser trajectory paths synchronously before frame display.
+### 1. Sequential Impulse Multi-Body Cluster Solver (`PhysicsEngineV2`)
+- **1000 Hz Continuous Collision Detection (CCD)**: Resolves disc-to-disc and disc-to-cushion rebounds using analytical quadratic equations, preventing tunneling regardless of puck speed.
+- **Iterative Multi-Body Contact Resolution**: Implements a Sequential Impulse relaxation solver (up to 10 sweeps) that accurately models momentum propagation through dense clusters (Newton's cradle effect: Striker $\to$ Puck A $\to$ Puck B $\to$ Puck C).
+- **Two-Phase Coulomb Friction & Slip Damping**: Accurately simulates the dynamic transition from sliding slip ($\mu \approx 0.160$) to pure rolling ($\mu \approx 0.108$) with gyroscopic spin coupling and pocket gravitational funnel suction ($980.0\text{ cm/s}^2$).
+- **Full Zigzag Deflection Path Tracking**: Computes and renders true intermediate deflection vertices for all contacted pucks during complex cluster disturbances.
+
+### 2. Online Adaptive AI Parameter Learning (`AdaptiveLearningEngine`)
+- **Self-Calibrating Physics**: Compares pre-shot predictive simulations against actual post-shot settled positions in real time.
+- **Dynamic Parameter Tuning**: Continually adjusts table friction ($\mu$), cushion restitution ($e$), cut-throw angular bias, and pocket capture radii across matches to achieve 100% telemetry convergence.
+
+### 3. Dynamic Rule Learning & Team Match Modes
+- **Multi-Player Support**: Automatically adapts to 2-Player (1v1), 3-Player free-for-all, and 4-Player 2v2 Team formats.
+- **Dynamic Rule Color Detection**: Distinguishes assigned scoring colors (White vs. Black vs. Queen) in real time without false early-game foul warnings.
+- **3-Player & Freestyle Mode Compatibility**: In multi-player or Disc Pool modes, enables scoring on all active pieces without color restriction lockouts.
+
+### 4. Normalized Rotated-View Coordinate Engine
+- **Inverted Striker Compensation**: Automatically normalizes table coordinates when the game engine assigns the user to the top baseline ($Y = +25.35\text{ cm}$) or a rotated perspective ($180^\circ$ view), ensuring striker sliding controls and aim lines mirror natural physical gestures.
+
+### 5. High-Density AutoPlay & Combination Shot Engine
+- **Multi-Tier Candidate Classifier**: Evaluates direct pots, 1/2 cushion bank shots, and multi-puck combination (cannon/kiss) shots through cluster disturbances.
+- **Dense Baseline Scanning**: Samples candidate slider positions at $2.0\text{ cm}$ intervals with up to $70^\circ$ cut-angle tolerances, finding narrow potting gaps in congested boards.
+- **Turn-Passer Safety Mode**: Intelligently plays low-risk placement shots when remaining turn time drops below critical thresholds ($\le 6.0\text{ s}$) to prevent timeout fouls.
+
+### 6. Android 15 & 16KB Page-Size Compliance
+- Native libraries (`libengine.so`, `libdobby.a`, `libxdl.a`) are compiled with modern C++20 standard flags and linked with `-z,max-page-size=16384` (`0x4000` alignment), fully certified for modern ARM64 devices running Android 15.
 
 ---
 
@@ -70,17 +82,19 @@ CatEngine operates an in-process virtualization model where target applications 
 
 ```
 -CatEngine/
-├── app/                        # Android host application (Jetpack Compose UI)
+├── app/                        # Android host application (Jetpack Compose UI & State Inspector)
 ├── Bcore/                      # Core Virtualization & Native Engine (libengine.so)
 │   ├── src/main/aidl/          # Virtual system services IPC interfaces
 │   ├── src/main/cpp/           # Native source: BoxCore, Dobby, xDL, CatEngine, Physics
-│   │   ├── catEngine/          # GLES hooks, calibration, and PhysicsEngineV2
+│   │   ├── catEngine/          # GLES hooks, AutoPlay, and UI calibration
+│   │   │   ├── v2/             # PhysicsEngineV2 & AdaptiveLearningEngine
+│   │   │   └── cv/             # BoardDetectionEngine & OpenCV feature extractors
 │   │   ├── Dobby/              # Prebuilt static hooking libraries (arm64-v8a, armeabi-v7a)
 │   │   └── xdl/                # Dynamic symbol resolver
 │   └── src/main/java/          # Virtual framework hooks (AMS, PMS, WMS, Window)
 ├── black-reflection/           # Compile-time reflection annotation library
 ├── compiler/                   # JavaPoet annotation processor for BlackReflection
-├── docs/                       # Comprehensive Engineering & Research Documentation
+├── docs/                       # Technical Architecture, Audits & Research Documentation
 │   ├── architecture/           # System architecture and memory contracts
 │   ├── audit/                  # Repository audit and technical reports
 │   ├── developer/              # Developer guide and coding conventions
@@ -88,10 +102,10 @@ CatEngine operates an in-process virtualization model where target applications 
 │   └── roadmap/                # Implementation roadmap and testing milestones
 ├── tools/                      # Tooling, maintenance scripts, and analysis harnesses
 │   ├── analysis/               # Offline APK inspection and binary tooling
-│   └── scripts/                # Repository maintenance and build automation
-├── build.gradle                # Root Gradle configuration
-├── settings.gradle             # Subproject inclusion & dependency resolution
-└── PROJECT_PROGRESS.md         # Real-time task progress matrix
+│   └── scripts/                # Compilation database generator & build scripts
+├── .github/workflows/          # Automated GitHub Actions CI/CD pipelines
+├── build.gradle                # Root Gradle build configuration
+└── settings.gradle             # Subproject inclusion & dependency resolution
 ```
 
 ---
@@ -102,29 +116,34 @@ CatEngine operates an in-process virtualization model where target applications 
 - **Operating System**: Windows 11 / Linux / macOS
 - **Android SDK**: Build-Tools `35.0.0`, Platform `android-35`
 - **Android NDK**: Version `28.2.13676358`
-- **JDK**: Java 17 (Azul Zulu or OpenJDK recommended)
+- **JDK**: Java 17 (Azul Zulu or Temurin recommended)
 
 ### Building the Project
+
 ```powershell
 # Clone the repository
 git clone https://github.com/Ayub131132/-CatEngine.git
 cd -CatEngine
 
-# Switch to the implementation branch
-git checkout feature/catengine-complete-implementation
+# Switch to the active development branch
+git checkout decode-motion-work
 
 # Assemble the complete debug APK
 .\gradlew.bat :app:assembleDebug
 ```
-The output APK will be generated at:
-`app/build/outputs/apk/debug/CatEngine_1.0.0_debug.apk`
+
+The compiled APK will be output to:
+```
+app/build/outputs/apk/debug/CatEngine_1.0.0_debug.apk
+```
 
 ### Installing & Running via ADB
+
 ```powershell
 # Verify connected testing device
 adb devices -l
 
-# Install the debug APK
+# Stream install the debug APK
 adb install -r app/build/outputs/apk/debug/CatEngine_1.0.0_debug.apk
 
 # Launch the CatEngine host UI
@@ -135,9 +154,9 @@ adb shell am start -n com.engine.cat/top.niunaijun.blackboxa.view.main.MainActiv
 
 ## Documentation Index
 
-Detailed engineering reports are available in the [docs/](docs/) directory:
+Detailed engineering documentation is maintained in the [docs/](docs/) directory:
 
-* **Architecture**: [CATENGINE_ARCHITECTURE.md](docs/architecture/CATENGINE_ARCHITECTURE.md)
+* **System Architecture**: [CATENGINE_ARCHITECTURE.md](docs/architecture/CATENGINE_ARCHITECTURE.md)
 * **Technical Audit**: [PROJECT_AUDIT.md](docs/audit/PROJECT_AUDIT.md)
 * **Binary Reverse Engineering**: [APK_ANALYSIS.md](docs/research/APK_ANALYSIS.md)
 * **Gameplay Dynamics**: [GAME_BEHAVIOUR_RESEARCH.md](docs/research/GAME_BEHAVIOUR_RESEARCH.md)
