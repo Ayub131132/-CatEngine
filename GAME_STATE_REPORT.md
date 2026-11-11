@@ -57,3 +57,4 @@ The CatEngine state machine coordinates match transitions, turn ownership, physi
 
 1. **Top Baseline False Positive:** Previously, `isValidBaselineY` accepted $|Y| > 10.0\text{ cm}$, treating the opponent's striker position as a local turn. Fixed by enforcing bottom baseline $Y \in [-35.0, -15.0]$ exclusively for local player turns.
 2. **Post-Shot Overlay Lingering:** Previously, `keepLineAfterShot` defaulted to `true`. Fixed by setting the default to `false` and automatically wiping trajectories upon shot release.
+

@@ -25,3 +25,4 @@
    Replaced synchronous `SharedPreferences` write operations on every slider drag with local `remember(value)` state and `onValueChangeFinished` commits.
 3. **Passive Hook Architecture:**
    Uses direct memory reading and function hooking with zero continuous polling when in lobby, match loading, or opponent turn states.
+

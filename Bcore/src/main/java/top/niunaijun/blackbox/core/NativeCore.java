@@ -126,6 +126,12 @@ public class NativeCore {
 
     public static native int getTargetColorMode();
 
+    public static native int getAutoDetectedColor();
+
+    public static native int getMatchPlayerCount();
+
+    public static native boolean isLocalTurnReady();
+
     public static native void applyEngineOffsets(String jsonOffsets);
 
 

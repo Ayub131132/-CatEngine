@@ -1797,31 +1797,40 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         }
 
         // Determine target legality based on assigned color
-        int targetMode = s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any
-        if (targetMode == 0) {
-            targetMode = s_autoDetectedColor.load(); // Dynamic real-time auto detection
-        }
-        if (targetMode == 0) {
-            // Infer from player's active baseline (curY > 0.0 means top baseline = Black, curY <= 0.0 means bottom baseline = White)
-            targetMode = (curY > 0.0) ? 2 : 1;
-        }
+        int targetMode = s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any, 4=2v2 Teams
+        int matchPlayers = CatEngine_GetMatchPlayerCount(); // 2, 3, or 4
+
         bool isIllegalTarget = false;
         int targetPuckType = -1;
 
-        if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0) {
-            std::lock_guard<std::mutex> lock(s_puckMutex);
-            for (const auto& pe : s_puckList) {
-                if (pe.id == sim.firstContactPuckId) {
-                    targetPuckType = pe.puckType;
-                    // Mode 1: Playing White -> Black coins are illegal
-                    if (targetMode == 1 && pe.puckType == 2) {
-                        isIllegalTarget = true;
+        if (targetMode == 3 || matchPlayers == 3) {
+            // Disc Pool / Freestyle or 3-player match: EVERY coin is legal! No red warning.
+            isIllegalTarget = false;
+        } else {
+            // Carrom Mode (1v1 or 2v2 Teams)
+            int effectiveColor = targetMode;
+            if (effectiveColor == 0 || effectiveColor == 4) {
+                effectiveColor = s_autoDetectedColor.load(); // Dynamic real-time auto detection
+            }
+            if (effectiveColor == 0) {
+                // If undecided at match start before first pot, infer from active baseline
+                effectiveColor = (curY > 0.0) ? 2 : 1;
+            }
+
+            if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0) {
+                std::lock_guard<std::mutex> lock(s_puckMutex);
+                for (const auto& pe : s_puckList) {
+                    if (pe.id == sim.firstContactPuckId) {
+                        targetPuckType = pe.puckType;
+                        if (pe.puckType != 3) { // Queen is always legal!
+                            if (effectiveColor == 1 && pe.puckType == 2) {
+                                isIllegalTarget = true; // Playing White -> Black is illegal
+                            } else if (effectiveColor == 2 && pe.puckType == 1) {
+                                isIllegalTarget = true; // Playing Black -> White is illegal
+                            }
+                        }
+                        break;
                     }
-                    // Mode 2: Playing Black -> White coins are illegal
-                    else if (targetMode == 2 && pe.puckType == 1) {
-                        isIllegalTarget = true;
-                    }
-                    break;
                 }
             }
         }
@@ -3007,18 +3016,21 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
 
     s_isActivelySearching.store(true);
 
-    int targetMode = s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any/Disc Pool
-    if (targetMode == 0) {
-        targetMode = s_autoDetectedColor.load();
+    int targetMode = s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any/Disc Pool, 4=2v2 Teams
+    int matchPlayers = CatEngine_GetMatchPlayerCount();
+
+    int effectiveColor = targetMode;
+    if (effectiveColor == 0 || effectiveColor == 4) {
+        effectiveColor = s_autoDetectedColor.load();
     }
-    if (targetMode == 0) {
-        targetMode = isTopBaseline ? 2 : 1;
+    if (effectiveColor == 0 && targetMode != 3 && matchPlayers != 3) {
+        effectiveColor = isTopBaseline ? 2 : 1;
     }
     auto isTargetAllowed = [&](int puckType) -> bool {
         if (puckType == 3) return true; // Queen always targetable
-        if (targetMode == 1) return (puckType == 1); // White only
-        if (targetMode == 2) return (puckType == 2); // Black only
-        if (targetMode == 3) return true; // Any puck (Freestyle / Disc Pool)
+        if (targetMode == 3 || matchPlayers == 3) return true; // Any coin in Disc Pool or 3-player
+        if (effectiveColor == 1) return (puckType == 1); // White only
+        if (effectiveColor == 2) return (puckType == 2); // Black only
         if (countWhite > 0 && countBlack == 0) return (puckType == 1);
         if (countBlack > 0 && countWhite == 0) return (puckType == 2);
         return true;

@@ -57,6 +57,7 @@ extern "C" {
 
 void CatEngine_UpdateTablePucks();
 bool CatEngine_IsLocalTurnReady();
+int CatEngine_GetMatchPlayerCount();
 
 // Initialize the graphics engine and hook swap buffers
 void initGraphicsEngine();

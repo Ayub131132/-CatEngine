@@ -358,6 +358,7 @@ static std::atomic<bool> s_isLocalTurnReady(false);
 static std::atomic<bool> s_isOpponentTurn(false);
 static std::atomic<int>  s_localBaselineId(0);
 static std::atomic<int>  s_lastPlayerIndex(0);
+static std::atomic<int>  s_totalMatchPlayers(2); // 2 = 1v1, 3 = 3-player, 4 = 4-player/2v2
 static int s_queenPuckId = -1;
 
 // In Carrom Pool libgame.so (onAimChanged & onShotFired), angle is already the Cartesian forward aim angle
@@ -560,6 +561,10 @@ extern "C" bool CatEngine_IsLocalTurnReady() {
     return s_isLocalTurnReady.load();
 }
 
+extern "C" int CatEngine_GetMatchPlayerCount() {
+    return s_totalMatchPlayers.load();
+}
+
 extern "C" void CatEngine_UpdateTablePucks();
 static inline void updateTablePucks() { CatEngine_UpdateTablePucks(); }
 
@@ -653,6 +658,7 @@ static void updateBaselineFromTableLogic(void* tc) {
     }
 
     if (cands.empty()) return;
+    s_totalMatchPlayers.store(static_cast<int>(cands.size()));
 
     // Select the local player's baseline: ALWAYS bottom baseline (y in [-35.0, -15.0]) in mobile view
     const BaselineCand* selected = nullptr;
@@ -1294,6 +1300,16 @@ static void my_forcePuckPosition(void* self, void* sel, int puckId, double x, do
         }
         int pType = determinePuckType(puckId, pAddr, x, y);
         bool isPotted = isInsidePocketPos(x, y);
+        if (isPotted && (pType == 1 || pType == 2) && GraphicsEngine_GetAutoDetectedColor() == 0) {
+            int matchPlayers = s_totalMatchPlayers.load();
+            if (matchPlayers == 3) {
+                GraphicsEngine_SetAutoDetectedColor(3);
+            } else if (s_isLocalTurnReady.load()) {
+                GraphicsEngine_SetAutoDetectedColor(pType);
+                ALOGI("[CatEngine] AUTO-LEARNED GAME COLOR RULE (Live Pot): Our Team is %s (puck #%d)",
+                      (pType == 2) ? "BLACK" : "WHITE", puckId);
+            }
+        }
         GraphicsEngine_UpdatePuck(puckId, x, y, !isPotted, pType);
     }
     if (orig_forcePuckPosition) {
@@ -1858,11 +1874,23 @@ static std::atomic<int> s_shotCount(0);
             appendLog("     * Actual Final:     POCKETED (CLEAN POT!) | Actual Travel: %.2f cm", pm.actDist);
             // Real-time automatic color rule learning from observed pot
             if (pm.type == 1 || pm.type == 2) {
-                int assignedColor = (tele.playerIndex == 0) ? pm.type : (3 - pm.type);
-                GraphicsEngine_SetAutoDetectedColor(assignedColor);
-                ALOGI("[CatEngine] AUTO-LEARNED GAME COLOR RULE: Player is %s (from potted puck #%d by %s)",
-                      (assignedColor == 2) ? "BLACK" : "WHITE", pm.id,
-                      (tele.playerIndex == 0) ? "Local Player" : "Opponent");
+                int shooter = tele.playerIndex;
+                int matchPlayers = s_totalMatchPlayers.load();
+                if (matchPlayers == 3) {
+                    // 3-Player match in Carrom Pool is ALWAYS Points/Disc Pool: ANY coin is valid!
+                    GraphicsEngine_SetAutoDetectedColor(3); // 3 = Any Coin
+                    ALOGI("[CatEngine] 3-PLAYER MATCH DETECTED: Set rule to ANY COIN (Points Mode)");
+                } else {
+                    // 1v1 or 2v2 Teams:
+                    // In 2v2, Player 0 & Player 2 are Team 1 (Our Team)
+                    // In 1v1, Player 0 is Our Team
+                    bool isOurTeam = (shooter == 0 || (matchPlayers == 4 && shooter == 2));
+                    int assignedColor = isOurTeam ? pm.type : (3 - pm.type);
+                    GraphicsEngine_SetAutoDetectedColor(assignedColor);
+                    ALOGI("[CatEngine] AUTO-LEARNED GAME COLOR RULE: Our Team is %s (from potted puck #%d by %s - Player %d, MatchPlayers=%d)",
+                          (assignedColor == 2) ? "BLACK" : "WHITE", pm.id,
+                          isOurTeam ? "Our Team" : "Opponent Team", shooter, matchPlayers);
+                }
             }
         } else {
             appendLog("     * Actual Final:     (%.2f, %.2f) cm | Actual Travel: %.2f cm", pm.actX, pm.actY, pm.actDist);
@@ -2129,6 +2157,9 @@ static void my_onShotFired(void* this_ptr, int playerIndex, bool flag, unsigned 
     }
     s_isLocalTurnReady.store(false);
     s_lastPlayerIndex.store(playerIndex);
+    if (playerIndex >= 2 && s_totalMatchPlayers.load() < 4) {
+        s_totalMatchPlayers.store(4);
+    }
 
     int64_t shotNowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();

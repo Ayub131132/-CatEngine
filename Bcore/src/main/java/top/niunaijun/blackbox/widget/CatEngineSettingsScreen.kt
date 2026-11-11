@@ -422,30 +422,132 @@ private fun TargetColorModeSelector(
     selectedMode: Int,
     onModeSelected: (Int) -> Unit
 ) {
-    val modes = listOf(
+    var matchPlayers by remember { mutableIntStateOf(CatEngineConfig.getMatchPlayerCount()) }
+    var detectedColor by remember { mutableIntStateOf(CatEngineConfig.getAutoDetectedColor()) }
+    var isLocalTurn by remember { mutableStateOf(CatEngineConfig.isLocalTurnReady()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            matchPlayers = CatEngineConfig.getMatchPlayerCount()
+            detectedColor = CatEngineConfig.getAutoDetectedColor()
+            isLocalTurn = CatEngineConfig.isLocalTurnReady()
+            kotlinx.coroutines.delay(300)
+        }
+    }
+
+    val modesRow1 = listOf(
         0 to "Auto",
-        1 to "White",
-        2 to "Black",
+        4 to "2v2 Teams",
         3 to "Any Coin"
     )
+    val modesRow2 = listOf(
+        1 to "White Only",
+        2 to "Black Only"
+    )
+
+    val matchDesc = when (matchPlayers) {
+        4 -> if (selectedMode == 3) "4-Player Disc Pool (Free-For-All)" else "2v2 Team Match (4 Players)"
+        3 -> "3-Player Points Match (Any Coin)"
+        else -> "1v1 Match (2 Players)"
+    }
+
+    val colorDesc = when {
+        selectedMode == 1 -> "Enforcing WHITE Coins"
+        selectedMode == 2 -> "Enforcing BLACK Coins"
+        selectedMode == 3 || matchPlayers == 3 -> "ANY COIN Allowed (Points/Freestyle)"
+        detectedColor == 1 -> "Auto: Our Team is WHITE"
+        detectedColor == 2 -> "Auto: Our Team is BLACK"
+        else -> "Auto: Auto-detecting on first pot"
+    }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
     ) {
+        // Live Game State Card
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = Color(0xFF141726),
+            border = BorderStroke(1.dp, Color(0xFF232840))
+        ) {
+            Column(modifier = Modifier.padding(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = matchDesc,
+                        color = AccentBlue,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (isLocalTurn) "YOUR TURN" else "WAITING TURN",
+                        color = if (isLocalTurn) AccentGreen else Color(0xFFF59E0B),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = colorDesc,
+                    color = TextSecondary,
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         Text(
-            text = "Target Coin Filter",
+            text = "Match Target Rules & Filtering",
             color = TextPrimary,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium
         )
         Spacer(modifier = Modifier.height(6.dp))
+
+        // Row 1: Auto, 2v2 Teams, Any Coin
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            modes.forEach { (modeId, label) ->
+            modesRow1.forEach { (modeId, label) ->
+                val isSelected = (selectedMode == modeId)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) AccentBlue else Color(0xFF1E2235))
+                        .border(
+                            BorderStroke(1.dp, if (isSelected) AccentBlue else Color(0xFF282C40)),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onModeSelected(modeId) }
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        color = if (isSelected) Color(0xFF0F111D) else TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Row 2: White Only, Black Only
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            modesRow2.forEach { (modeId, label) ->
                 val isSelected = (selectedMode == modeId)
                 Box(
                     modifier = Modifier

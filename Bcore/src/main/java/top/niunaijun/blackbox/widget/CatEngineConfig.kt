@@ -267,11 +267,23 @@ object CatEngineConfig {
     }
 
     fun updateTargetColorMode(context: Context, mode: Int) {
-        val clamped = mode.coerceIn(0, 3)
+        val clamped = mode.coerceIn(0, 4)
         targetColorMode = clamped
         getPrefs(context).edit().putInt(KEY_TARGET_COLOR_MODE, clamped).apply()
         try {
             NativeCore.setTargetColorMode(clamped)
         } catch (ignored: Throwable) {}
+    }
+
+    fun getAutoDetectedColor(): Int {
+        return try { NativeCore.getAutoDetectedColor() } catch (t: Throwable) { 0 }
+    }
+
+    fun getMatchPlayerCount(): Int {
+        return try { NativeCore.getMatchPlayerCount() } catch (t: Throwable) { 2 }
+    }
+
+    fun isLocalTurnReady(): Boolean {
+        return try { NativeCore.isLocalTurnReady() } catch (t: Throwable) { false }
     }
 }
