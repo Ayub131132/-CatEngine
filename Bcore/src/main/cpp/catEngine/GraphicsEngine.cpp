@@ -2,6 +2,7 @@
 #include "../Log.h"
 #include "GraphicsEngine.h"
 #include "v2/PhysicsEngineV2.h"
+#include "v2/AdaptiveLearningEngine.h"
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <dlfcn.h>
@@ -27,7 +28,7 @@ static const float kOpponentBaselineY   = 25.35f;
 
 static std::atomic<float> s_strikerRadius(2.65f);
 static std::atomic<float> s_puckRadius(1.95f);
-static std::atomic<float> s_pocketRadius(2.15f);
+static std::atomic<float> s_pocketRadius(2.65f);
 std::atomic<float> s_pocketInset(33.48f);
 static std::atomic<bool>  s_hasUserPocketRadius(false);
 static std::atomic<float> s_maxTravelDistance(150.0f);
@@ -179,6 +180,7 @@ static std::atomic<double> s_scanLiveAngle(0.0);
 static std::atomic<bool>   s_isActivelySearching(false);
 static std::atomic<int64_t> s_shotReleasedTimeMs(0);
 static std::atomic<int>    s_targetColorMode(0); // 0 = Auto, 1 = White Only, 2 = Black Only, 3 = Any Puck
+static std::atomic<int>    s_autoDetectedColor(0); // 0 = Undecided/Auto, 1 = White, 2 = Black, 3 = Any Puck
 
 extern "C" bool CatEngine_GetLiveStrikerPos(double* outX, double* outY);
 
@@ -735,17 +737,15 @@ struct PhysBody {
     std::vector<TrajectorySegment> segments;
 };
 
-static inline bool isPuckPottedOrInvalid(double x, double y, double inset = 33.48, double holeRad = 2.15) {
+static inline bool isPuckPottedOrInvalid(double x, double y, double inset = 33.48, double holeRad = 2.65) {
     if (std::isnan(x) || std::isnan(y)) return true;
     double ax = std::abs(x);
     double ay = std::abs(y);
     if (ax > 36.5 || ay > 36.5) return true;
-    if (ax > 29.0 && ay > 29.0) {
+    if (ax > 26.0 && ay > 26.0) {
         double dx = ax - inset;
         double dy = ay - inset;
-        // Static pucks resting in table corners have hypot ~2.5 to 4.5 cm.
-        // A puck is only dropped into the pocket hole when deep inside (< 1.6 cm).
-        if (std::hypot(dx, dy) < 1.6) return true;
+        if (std::hypot(dx, dy) <= holeRad) return true;
     }
     return false;
 }
@@ -782,6 +782,12 @@ static AimSimulationResult simulateStrikerTrajectoryUniversal(double startX, dou
         v0 += bonus;
     }
     v0 *= s_powerMultiplier.load();
+
+    // Incorporate real-time AI adaptive physics parameters
+    auto learnedAI = catengine::ai::AdaptiveLearningEngine::getInstance().getLearnedParameters();
+    if (learnedAI.totalShotsLearned > 0) {
+        v0 *= learnedAI.forceScaleFactor;
+    }
 
     // 2. Setup bodies
     std::vector<PhysBody> bodies;
@@ -834,7 +840,10 @@ static AimSimulationResult simulateStrikerTrajectoryUniversal(double startX, dou
     const double dt = 0.001; // Authentic 1000 Hz CCD step (libgame.so 0x12ea830)
     const double gDecel = 980.0;
     const double e_body = s_restitutionBody.load();
-    const double e_cush = std::clamp(s_restitutionCushion.load(), 0.05, 0.99);
+    double e_cush = std::clamp(s_restitutionCushion.load(), 0.05, 0.99);
+    if (learnedAI.totalShotsLearned > 0) {
+        e_cush = std::clamp(static_cast<double>(learnedAI.cushionRestitution), 0.05, 0.99);
+    }
 
     const double pocketCenters[4][2] = {
         {  pkInset,  pkInset },
@@ -1033,6 +1042,9 @@ static AimSimulationResult simulateStrikerTrajectoryUniversal(double startX, dou
                     double curSpd = std::hypot(b.vx, b.vy);
                     if (curSpd > 0.15) {
                         double muTable = (b.id == -1) ? s_strikerFriction.load() : s_puckFriction.load();
+                        if (learnedAI.totalShotsLearned > 0) {
+                            muTable = (b.id == -1) ? (learnedAI.tableFriction * 0.90) : learnedAI.tableFriction;
+                        }
                         if (muTable < 0.0001) muTable = 0.0001;
                         double dv = muTable * gDecel * advanceDt;
                         if (curSpd <= dv) {
@@ -1768,6 +1780,32 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             hasSim = true;
         }
 
+        // Determine target legality based on assigned color
+        int targetMode = s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any
+        if (targetMode == 0) {
+            targetMode = s_autoDetectedColor.load(); // Dynamic real-time auto detection
+        }
+        bool isIllegalTarget = false;
+        int targetPuckType = -1;
+
+        if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0) {
+            std::lock_guard<std::mutex> lock(s_puckMutex);
+            for (const auto& pe : s_puckList) {
+                if (pe.id == sim.firstContactPuckId) {
+                    targetPuckType = pe.puckType;
+                    // Mode 1: Playing White -> Black coins are illegal
+                    if (targetMode == 1 && pe.puckType == 2) {
+                        isIllegalTarget = true;
+                    }
+                    // Mode 2: Playing Black -> White coins are illegal
+                    else if (targetMode == 2 && pe.puckType == 1) {
+                        isIllegalTarget = true;
+                    }
+                    break;
+                }
+            }
+        }
+
         // Determine which pocket(s) are targeted by potted pucks (or striker scratch)
         bool pocketPotted[4] = { false, false, false, false };
         bool pocketScratched[4] = { false, false, false, false };
@@ -1775,7 +1813,7 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             if (sim.strikerInPocket && sim.strikerPocketIndex >= 0 && sim.strikerPocketIndex < 4) {
                 pocketScratched[sim.strikerPocketIndex] = true;
             }
-            if (sim.hitPuck) {
+            if (sim.hitPuck && !isIllegalTarget) {
                 for (const auto& traj : sim.puckTrajectories) {
                     if (traj.inPocket && traj.pocketIndex >= 0 && traj.pocketIndex < 4) {
                         pocketPotted[traj.pocketIndex] = true;
@@ -1818,9 +1856,9 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             std::lock_guard<std::mutex> lock(s_puckMutex);
             for (const auto& pe : s_puckList) {
                 if (pe.id == sim.firstContactPuckId && pe.active && !isPuckPottedOrInvalid(pe.x, pe.y, pkInset, pkRad)) {
-                    BodyColor col = getEntityColor(pe.id, pe.puckType);
+                    BodyColor col = isIllegalTarget ? BodyColor{ 1.0f, 0.15f, 0.15f, 1.0f } : getEntityColor(pe.id, pe.puckType);
                     float innerR = std::max(0.0f, pkRadius - 0.12f);
-                    drawTableRing(tableMVP, feather, pe.x, pe.y, pkRadius, innerR, col.r, col.g, col.b, 0.70f * lineAlpha);
+                    drawTableRing(tableMVP, feather, pe.x, pe.y, pkRadius, innerR, col.r, col.g, col.b, 0.85f * lineAlpha);
                     break;
                 }
             }
@@ -1842,8 +1880,8 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         }
 
         if (hasSim && s_showPrediction.load()) {
-            if (sim.strikerInPocket) {
-                // Warning Red line for scratch foul!
+            if (sim.strikerInPocket || isIllegalTarget) {
+                // Warning Red line for scratch foul or illegal target!
                 stColor = { 1.0f, 0.18f, 0.18f, 1.0f };
             }
             // Guarantee at least one forward segment so the guideline is NEVER invisible!
@@ -1885,8 +1923,15 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                 for (size_t p = 0; p < sim.puckTrajectories.size(); p++) {
                     const auto& traj = sim.puckTrajectories[p];
                     if (traj.segments.empty() && !traj.inPocket && !traj.isHit) continue;
-                    // If potted: change entire trajectory line and circle to Electric Neon Emerald!
-                    BodyColor pkColor = traj.inPocket ? kPotColor : getEntityColor(traj.puckIndex, traj.puckType);
+                    // If illegal target: Warning Red; If potted: Electric Neon Emerald; Else: Entity Color
+                    BodyColor pkColor;
+                    if (isIllegalTarget) {
+                        pkColor = { 1.0f, 0.18f, 0.18f, 1.0f };
+                    } else if (traj.inPocket) {
+                        pkColor = kPotColor;
+                    } else {
+                        pkColor = getEntityColor(traj.puckIndex, traj.puckType);
+                    }
 
                     if (traj.segments.empty() && (traj.isHit || traj.inPocket)) {
                         drawTableLine(tableMVP, feather, traj.startX, traj.startY, traj.finalX, traj.finalY,
@@ -2624,6 +2669,15 @@ int GraphicsEngine_GetTargetColorMode() {
     return s_targetColorMode.load();
 }
 
+void GraphicsEngine_SetAutoDetectedColor(int color) {
+    s_autoDetectedColor.store(color);
+    ALOGI("[GRAPHICS ENGINE] Auto-Detected Color updated to %d (1=White, 2=Black, 3=Any)", color);
+}
+
+int GraphicsEngine_GetAutoDetectedColor() {
+    return s_autoDetectedColor.load();
+}
+
 // =========================================================================================
 // AUTO-STRIKE COMBINATION SEARCH CONTROLLER (HIGH-SPEED DYNAMIC BASELINE & ALL-ANGLE SCANNER)
 // =========================================================================================
@@ -2642,6 +2696,10 @@ struct CandidateShot {
     int cushionCount = 0;
     int secondaryHits = 0;
     double cutAngleDeg = 0.0;
+    double puckStartX = 0.0;
+    double puckStartY = 0.0;
+    double predLandingX = 0.0;
+    double predLandingY = 0.0;
 };
 
 static CandidateShot s_cachedFallbackTier2;
@@ -2719,6 +2777,9 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
 
         // Target Puck Color Filter (0=Auto, 1=White Only, 2=Black Only, 3=Any/Disc Pool/Points)
         int mode = s_targetColorMode.load();
+        if (mode == 0) {
+            mode = s_autoDetectedColor.load();
+        }
         bool isPuckAllowed = false;
         if (traj.puckType == 3) {
             isPuckAllowed = true; // Queen is always a valid scoring target
@@ -2811,9 +2872,11 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
             }
         }
         double queenBonus = (traj.puckType == 3) ? 15000.0 : 0.0;
-        double myPuckBonus = (traj.puckType == 1) ? 5000.0 : 0.0;
+        int targetColor = (mode == 2) ? 2 : 1;
+        double myPuckBonus = (traj.puckType == targetColor) ? 5000.0 : 0.0;
 
-        double finalScore = baseScore + straightBonus + (100.0 - risk) * 250.0 + queenBonus + myPuckBonus;
+        double centeringBonus = std::max(0.0, (pkRad - dToPocketCenter)) * 40000.0;
+        double finalScore = baseScore + straightBonus + (100.0 - risk) * 250.0 + centeringBonus + queenBonus + myPuckBonus;
 
         outCand->candX = candX;
         outCand->candY = candY;
@@ -2833,6 +2896,10 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
         outCand->cushionCount = puckCushBounces;
         outCand->secondaryHits = secondaryPuckHits;
         outCand->cutAngleDeg = cutDeg;
+        outCand->puckStartX = traj.startX;
+        outCand->puckStartY = traj.startY;
+        outCand->predLandingX = traj.finalX;
+        outCand->predLandingY = traj.finalY;
         return true;
     }
 
@@ -2921,12 +2988,15 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
     s_isActivelySearching.store(true);
 
     int targetMode = s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any/Disc Pool
+    if (targetMode == 0) {
+        targetMode = s_autoDetectedColor.load();
+    }
     auto isTargetAllowed = [&](int puckType) -> bool {
         if (puckType == 3) return true; // Queen always targetable
         if (targetMode == 1) return (puckType == 1); // White only
         if (targetMode == 2) return (puckType == 2); // Black only
         if (targetMode == 3) return true; // Any puck (Freestyle / Disc Pool)
-        // Auto mode (0):
+        // Auto mode (0): if undecided, allow whichever color user targets
         if (countWhite > 0 && countBlack > 0) return true;
         if (countWhite > 0) return (puckType == 1);
         if (countBlack > 0) return (puckType == 2);
@@ -3195,18 +3265,31 @@ execute_selected_shot:
         return false;
     }
 
-    // Refinement pass for chosen shot: skip in fastFirstShotMode to prevent lag/freeze
+    // 100% Precision Multi-Step Refinement pass: fine-tune angle directly into dead center of pocket
     if (!s_fastFirstShotMode.load() && bestShot.tier <= 3) {
         double refinedAngle = bestShot.angleRad;
+        double minPocketDist = 999.0;
         double bestRefinedScore = bestShot.score;
-        for (double delta : {-0.006, 0.006}) {
+
+        // 11-step micro-sweep around candidate angle in 0.003 rad steps
+        for (double delta = -0.015; delta <= 0.0151; delta += 0.003) {
             double a = bestShot.angleRad + delta;
             AimSimulationResult sim = simulateStrikerTrajectory(bestShot.candX, baselineY, a, bestShot.forceVal, 600);
             CandidateShot cand;
             if (evaluateCandidateShot(sim, bestShot.candX, static_cast<float>(baselineY), a, bestShot.forceVal, &cand, true)) {
-                if (cand.score > bestRefinedScore && cand.tier <= bestShot.tier) {
-                    bestRefinedScore = cand.score;
-                    refinedAngle = a;
+                if (cand.potted && cand.tier <= bestShot.tier) {
+                    double dCenter = 999.0;
+                    for (const auto& traj : sim.puckTrajectories) {
+                        if (traj.inPocket) {
+                            dCenter = std::hypot(traj.pocketCenterX - traj.finalX, traj.pocketCenterY - traj.finalY);
+                            break;
+                        }
+                    }
+                    if (dCenter < minPocketDist) {
+                        minPocketDist = dCenter;
+                        refinedAngle = a;
+                        bestRefinedScore = cand.score;
+                    }
                 }
             }
         }
@@ -3221,11 +3304,35 @@ execute_selected_shot:
     double targetAngle = bestShot.angleRad;
     double targetForce = bestShot.forceVal;
 
+    // Apply real-time adaptive AI learning correction
+    targetAngle = catengine::ai::AdaptiveLearningEngine::getInstance().getCorrectedAimAngle(
+        targetAngle, bestShot.cutAngleDeg, 30.0);
+
     // Move striker horizontally along baseline to target X position
     if (std::abs(targetX - startX) > 0.08) {
         CatEngine_MoveStriker(targetX, baselineY);
         onStrikerPositionUpdated(targetX, baselineY);
+
+        // Wait for game's internal physics to settle the striker at targetX (prevents firing mid-slide!)
+        for (int w = 0; w < 12; w++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            double liveX = 0.0, liveY = 0.0;
+            if (CatEngine_GetLiveStrikerPos(&liveX, &liveY)) {
+                if (std::abs(liveX - targetX) < 0.20) {
+                    break;
+                }
+            }
+        }
     }
+
+    // Record pre-shot prediction with Adaptive Learning Engine for continuous real-time model improvement
+    catengine::ai::AdaptiveLearningEngine::getInstance().recordPreShotPrediction(
+        targetX, baselineY, targetAngle, targetForce,
+        bestShot.targetPuckId, bestShot.targetPuckType,
+        bestShot.puckStartX, bestShot.puckStartY,
+        bestShot.predLandingX, bestShot.predLandingY,
+        bestShot.potted
+    );
 
     // Set locked aim and update guideline overlay so trajectory lines and target pockets are displayed
     GraphicsEngine_UpdateAim(targetX, baselineY, targetAngle, targetForce, true);

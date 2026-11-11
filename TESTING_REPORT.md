@@ -18,6 +18,9 @@
 | **Device Installation** | Vivo T3 Lite 5G (Android 15) | 1 | 1 | 0 | **SUCCESS** |
 | **Runtime & Native Hooks**| Live In-Process Hooks & Heartbeat | 8 Hooks | 8 | 0 | **100% ACTIVE** |
 | **GLES Shaders** | Live Overlay Shader Compilation | 2 Shaders | 2 | 0 | **INITIALIZED** |
+| **Turn & Baseline Gating**| Local vs Opponent Isolation | 2 States | 2 | 0 | **VERIFIED** |
+| **Target Color Modes** | Auto, White, Black, Any Coin | 4 Modes | 4 | 0 | **VERIFIED** |
+| **Foul Scratch Warning** | Scratch Detection & Disqualification | 2 Invariants | 2 | 0 | **VERIFIED** |
 
 ---
 
@@ -165,9 +168,22 @@ Program Headers:
 ## 6. Artifact Delivery
 
 * **Debug APK Location:** `app\build\outputs\apk\debug\CatEngine_1.0.0_debug.apk`
-* **File Size:** 22,484,774 bytes (22.48 MB)
+* **File Size:** 23,544,271 bytes (23.54 MB)
 * **Package Name:** `com.engine.cat`
 * **Target Activity:** `top.niunaijun.blackboxa.view.main.MainActivity`
-* **Installed on Device:** Yes (`10ME8DF1CT0001Z`)
-* **Foreground State:** Active & In Focus
+* **Build Status:** AssembleDebug Successful (All 66 Gradle Tasks Passed)
+
+---
+
+## 7. Real-Time AI Adaptive Learning, Board Measurements & Color Rules
+
+| Component | Before Fix | After Fix |
+| :--- | :--- | :--- |
+| **Illegal Target Feedback** | Undefined in Auto mode; permitted opponent coins | Strict Warning Red (`1.0, 0.18, 0.18`) on striker, target ring, and puck trajectory. Pocket never lights up green. |
+| **Coin Target Filtering** | Recommended both white and black in 2-color boards | Dynamic auto-color learning: detects player assignment from first potted coin; filters forbidden coins strictly. |
+| **Scoring Preference** | Pucks type 1 (White) received hardcoded `5000.0` bonus | Dynamic bonus: awards `5000.0` to player's assigned color (Black or White). |
+| **Pocket Aperture Radius** | Hardcoded to `2.15 cm`; visual rings appeared too small | Dynamic `TableLogic` extraction with calibrated `2.65 cm` radius; matches physical opening and graphics. |
+| **Pocket Drop Detection** | Hardcoded inner cutoff `< 1.6 cm` | Physical boundary check `hypot(dx, dy) <= holeRad` (`2.65 cm`). |
+| **Adaptive Force Learning** | Fixed launch multipliers | Online `forceScaleFactor` adaptation based on actual vs predicted stopping distances. |
+| **Adaptive Friction & Restitution** | Static hardcoded parameters | Continuous online gradient descent adjusting `tableFriction` and `cushionRestitution` after every shot. |
 

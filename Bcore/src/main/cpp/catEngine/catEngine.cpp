@@ -22,6 +22,7 @@
 #include "../Log.h"
 #include "Dobby/dobby.h"
 #include "GraphicsEngine.h"
+#include "v2/AdaptiveLearningEngine.h"
 
 // Confirmed MCPoint structure: two 64-bit IEEE 754 floating-point doubles (double x, double y)
 struct MCPointDouble {
@@ -533,6 +534,7 @@ static void CatEngine_OnMatchDestroyed() {
     s_turnTimerStartMs.store(0);
     s_queenPuckId = -1;
     g_geometryDiscovered.store(false);
+    GraphicsEngine_SetAutoDetectedColor(0);
     g_baselineDiscovered.store(false);
     GraphicsEngine_OnMatchDestroyed();
 }
@@ -723,11 +725,14 @@ static void updateGeometryFromTableLogic(void* tc) {
                 if (!std::isnan(px) && !std::isnan(py) && !std::isnan(pr) &&
                     std::abs(px) > 25.0 && std::abs(px) < 37.0 && pr > 1.0 && pr < 8.0) {
                     float inset = static_cast<float>((std::abs(px) + std::abs(py)) * 0.5);
-                    // Authentic pocket drop hole capture radius default 2.15 cm
-                    float rad = 2.15f;
+                    // Calibrate authentic pocket drop capture radius from physical TableLogic geometry
+                    float rad = static_cast<float>(pr);
+                    if (rad < 2.30f || rad > 3.60f) {
+                        rad = 2.65f; // Authentic Carrom Pool visual and physical pocket aperture radius
+                    }
                     GraphicsEngine_SetPocketGeometry(inset, rad);
-                    ALOGI("[CatEngine] DYNAMIC POCKET DISCOVERED! Inset=%.3f cm, Radius=%.3f cm (px=%.2f, py=%.2f)",
-                          inset, rad, px, py);
+                    ALOGI("[CatEngine] DYNAMIC POCKET DISCOVERED! Inset=%.3f cm, Radius=%.3f cm (raw pr=%.3f, px=%.2f, py=%.2f)",
+                          inset, rad, pr, px, py);
                     break;
                 }
             }
@@ -1851,6 +1856,14 @@ static std::atomic<int> s_shotCount(0);
                   pm.predX, pm.predY, pm.predPot ? "YES" : "NO", pm.predDist);
         if (pm.actPot) {
             appendLog("     * Actual Final:     POCKETED (CLEAN POT!) | Actual Travel: %.2f cm", pm.actDist);
+            // Real-time automatic color rule learning from observed pot
+            if (pm.type == 1 || pm.type == 2) {
+                int assignedColor = (tele.playerIndex == 0) ? pm.type : (3 - pm.type);
+                GraphicsEngine_SetAutoDetectedColor(assignedColor);
+                ALOGI("[CatEngine] AUTO-LEARNED GAME COLOR RULE: Player is %s (from potted puck #%d by %s)",
+                      (assignedColor == 2) ? "BLACK" : "WHITE", pm.id,
+                      (tele.playerIndex == 0) ? "Local Player" : "Opponent");
+            }
         } else {
             appendLog("     * Actual Final:     (%.2f, %.2f) cm | Actual Travel: %.2f cm", pm.actX, pm.actY, pm.actDist);
         }
@@ -1879,6 +1892,18 @@ static std::atomic<int> s_shotCount(0);
         }
         if (maxPosErr > 2.5) {
             appendLog("     -> Max puck deviation was %.2f cm. Check table center calibration (X/Y) or cushion alignment.", maxPosErr);
+        }
+    }
+
+    // Train Real-Time Adaptive Physics Learning Engine on observed physical outcome
+    if (tele.hasFirstImpact && tele.firstContactPuckId >= 0) {
+        for (const auto& pm : matchResults) {
+            if (pm.id == tele.firstContactPuckId) {
+                catengine::ai::AdaptiveLearningEngine::getInstance().recordPostShotOutcomeAndTrain(
+                    pm.actX, pm.actY, pm.actPot, tele.strikerCushionBounces
+                );
+                break;
+            }
         }
     }
     appendLog("=======================================================================================================================");

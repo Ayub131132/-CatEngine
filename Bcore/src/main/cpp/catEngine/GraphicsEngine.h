@@ -321,6 +321,8 @@ bool GraphicsEngine_ScanAndExecuteBestShot();
 // Target Puck Selection Mode: 0 = Auto, 1 = White Only, 2 = Black Only, 3 = Any Puck
 void GraphicsEngine_SetTargetColorMode(int mode);
 int GraphicsEngine_GetTargetColorMode();
+void GraphicsEngine_SetAutoDetectedColor(int color);
+int GraphicsEngine_GetAutoDetectedColor();
 
 #ifdef __cplusplus
 }

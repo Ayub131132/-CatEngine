@@ -46,6 +46,7 @@ JniHook/JniHook.cpp \
 catEngine/catEngine.cpp \
 catEngine/GraphicsEngine.cpp \
 catEngine/v2/PhysicsEngineV2.cpp \
+catEngine/v2/AdaptiveLearningEngine.cpp \
 catEngine/cv/BoardDetectionEngine.cpp
 
 LOCAL_C_INCLUDES += $(LOCAL_PATH)
