@@ -1,24 +1,59 @@
-*.iml
-*.idea
-.gradle
-.kotlin/*
-/.kotlin
-/logs/
-/local.properties
-/inspiration
-/.idea/*
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-*.logcat
-.vscode
-/build
-/captures
+# Built application files
+*.apk
+*.aar
+*.aab
+
+# Files for the ART/DALVIK
+*.dex
+
+# Gradle files
+.gradle/
+build/
+*/build/
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# Compile-time / Native build artifacts
 .externalNativeBuild
-.cxx
+.cxx/
+*.o
+*.d
+app/build/
+Bcore/build/
+compiler/build/
+black-reflection/build/
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+
+# Local configuration file (sdk path, etc)
 local.properties
-/app/release/
+
+# Log files
+*.log
+*.logcat
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Analysis targets & split APKs (Keep off Git to avoid repository bloat)
+CarromPool_APK/
+tools/analysis/
+extracted_carrom/
+*.zip
+
+# Agent runtime state
+.agents/
+skills-lock.json
+
+# Local Clang / Compilation databases
+compile_commands.json
+*.png
+diagnostics/

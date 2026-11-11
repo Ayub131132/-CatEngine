@@ -22,6 +22,7 @@
 #include "../Log.h"
 #include "Dobby/dobby.h"
 #include "GraphicsEngine.h"
+#include "v2/AdaptiveLearningEngine.h"
 
 // Confirmed MCPoint structure: two 64-bit IEEE 754 floating-point doubles (double x, double y)
 struct MCPointDouble {
@@ -354,8 +355,11 @@ static void* s_capturedShotDelegate = nullptr;
 static uintptr_t s_knownControlsVtable = 0;
 static std::atomic<bool> s_isInEngineAimActive(false);
 static std::atomic<bool> s_isLocalTurnReady(false);
+static std::atomic<bool> s_isOpponentTurn(false);
+static std::atomic<bool> s_isLocalTurnRotated(false); // True when local player is assigned top baseline (table is rotated 180 deg)
 static std::atomic<int>  s_localBaselineId(0);
 static std::atomic<int>  s_lastPlayerIndex(0);
+static std::atomic<int>  s_totalMatchPlayers(2); // 2 = 1v1, 3 = 3-player, 4 = 4-player/2v2
 static int s_queenPuckId = -1;
 
 // In Carrom Pool libgame.so (onAimChanged & onShotFired), angle is already the Cartesian forward aim angle
@@ -515,6 +519,7 @@ static void* findTableControllerFromMatchController(void* mc) {
 static void CatEngine_OnMatchDestroyed() {
     g_matchActive.store(false);
     s_isLocalTurnReady.store(false);
+    s_isLocalTurnRotated.store(false);
     setGraphicsMatchActive(false);
     GraphicsEngine_ResetNativeAffine();
     s_isInEngineAimActive.store(false);
@@ -532,6 +537,7 @@ static void CatEngine_OnMatchDestroyed() {
     s_turnTimerStartMs.store(0);
     s_queenPuckId = -1;
     g_geometryDiscovered.store(false);
+    GraphicsEngine_SetAutoDetectedColor(0);
     g_baselineDiscovered.store(false);
     GraphicsEngine_OnMatchDestroyed();
 }
@@ -555,6 +561,10 @@ extern "C" bool CatEngine_IsMatchAlive() {
 
 extern "C" bool CatEngine_IsLocalTurnReady() {
     return s_isLocalTurnReady.load();
+}
+
+extern "C" int CatEngine_GetMatchPlayerCount() {
+    return s_totalMatchPlayers.load();
 }
 
 extern "C" void CatEngine_UpdateTablePucks();
@@ -650,13 +660,18 @@ static void updateBaselineFromTableLogic(void* tc) {
     }
 
     if (cands.empty()) return;
+    s_totalMatchPlayers.store(static_cast<int>(cands.size()));
 
-    // Select the local player's baseline: ALWAYS bottom baseline (y in [-35.0, -15.0]) in mobile view
+    // Select the local player's baseline:
+    // If targetKey was learned from setupLocalStrikerBar / my_tl_moveStrikerSmooth, match that candidate.
+    // If targetKey is a top baseline (y > 0.0), the game has rotated the camera 180 degrees so that
+    // top appears at the bottom of the device screen. In that case, dragging left on device screen
+    // decreases screen coordinate, which maps to -X in table space if inverted.
     const BaselineCand* selected = nullptr;
     int targetKey = s_localBaselineId.load();
     if (targetKey >= 0) {
         for (const auto& c : cands) {
-            if (c.key == targetKey && c.y < -15.0 && c.y > -35.0) {
+            if (c.key == targetKey) {
                 selected = &c;
                 break;
             }
@@ -672,6 +687,8 @@ static void updateBaselineFromTableLogic(void* tc) {
     }
     if (!selected && !cands.empty()) selected = &cands[0];
 
+    bool isRotated = (selected->y > 0.0);
+    s_isLocalTurnRotated.store(isRotated);
     s_localBaselineId.store(selected->key);
     s_lastPlayerIndex.store(selected->key);
     g_baselineMinX.store(selected->minX);
@@ -681,8 +698,8 @@ static void updateBaselineFromTableLogic(void* tc) {
     g_liveStrikerY.store(lockedY);
     GraphicsEngine_SetBaselineRange(static_cast<float>(selected->minX), static_cast<float>(selected->maxX));
     g_baselineDiscovered.store(true);
-    ALOGI("[CatEngine] AUTHENTIC LOCAL BASELINE DISCOVERED: Key=%d, Y=%.3f cm (top=%s), Sliding Range: [%.3f, %.3f] cm (fromPoints=%d)",
-          selected->key, lockedY, lockedY > 0.0 ? "YES" : "NO", selected->minX, selected->maxX, selected->hasRange ? 1 : 0);
+    ALOGI("[CatEngine] AUTHENTIC LOCAL BASELINE DISCOVERED: Key=%d, Y=%.3f cm (top=%s, rotated=%s), Sliding Range: [%.3f, %.3f] cm (fromPoints=%d)",
+          selected->key, selected->y, selected->y > 0.0 ? "YES" : "NO", isRotated ? "TRUE" : "FALSE", selected->minX, selected->maxX, selected->hasRange ? 1 : 0);
 }
 
 // Discover authentic Pocket, Striker, and Puck geometry directly from TableLogic
@@ -722,11 +739,14 @@ static void updateGeometryFromTableLogic(void* tc) {
                 if (!std::isnan(px) && !std::isnan(py) && !std::isnan(pr) &&
                     std::abs(px) > 25.0 && std::abs(px) < 37.0 && pr > 1.0 && pr < 8.0) {
                     float inset = static_cast<float>((std::abs(px) + std::abs(py)) * 0.5);
-                    // Authentic pocket drop hole capture radius default 2.15 cm
-                    float rad = 2.15f;
+                    // Calibrate authentic pocket drop capture radius from physical TableLogic geometry
+                    float rad = static_cast<float>(pr);
+                    if (rad < 2.30f || rad > 3.60f) {
+                        rad = 2.65f; // Authentic Carrom Pool visual and physical pocket aperture radius
+                    }
                     GraphicsEngine_SetPocketGeometry(inset, rad);
-                    ALOGI("[CatEngine] DYNAMIC POCKET DISCOVERED! Inset=%.3f cm, Radius=%.3f cm (px=%.2f, py=%.2f)",
-                          inset, rad, px, py);
+                    ALOGI("[CatEngine] DYNAMIC POCKET DISCOVERED! Inset=%.3f cm, Radius=%.3f cm (raw pr=%.3f, px=%.2f, py=%.2f)",
+                          inset, rad, pr, px, py);
                     break;
                 }
             }
@@ -1288,6 +1308,16 @@ static void my_forcePuckPosition(void* self, void* sel, int puckId, double x, do
         }
         int pType = determinePuckType(puckId, pAddr, x, y);
         bool isPotted = isInsidePocketPos(x, y);
+        if (isPotted && (pType == 1 || pType == 2) && GraphicsEngine_GetAutoDetectedColor() == 0) {
+            int matchPlayers = s_totalMatchPlayers.load();
+            if (matchPlayers == 3) {
+                GraphicsEngine_SetAutoDetectedColor(3);
+            } else if (s_isLocalTurnReady.load()) {
+                GraphicsEngine_SetAutoDetectedColor(pType);
+                ALOGI("[CatEngine] AUTO-LEARNED GAME COLOR RULE (Live Pot): Our Team is %s (puck #%d)",
+                      (pType == 2) ? "BLACK" : "WHITE", puckId);
+            }
+        }
         GraphicsEngine_UpdatePuck(puckId, x, y, !isPotted, pType);
     }
     if (orig_forcePuckPosition) {
@@ -1310,10 +1340,15 @@ static void my_forceStrikerPosition(void* self, void* sel, int baselineId, doubl
     }
 
     // STRICT ISOLATION: Never process or store opponent striker positions!
-    // Local player baseline is strictly at the bottom (-25.35 cm).
-    if (!s_isLocalTurnReady.load() || y > 0.0) {
+    // If table view is not rotated, local baseline is at y < 0.0.
+    // If table view is rotated 180 deg (local baseline is top), y > 0.0 is the local player!
+    if (!s_isLocalTurnReady.load()) {
         return;
     }
+    bool isRotated = s_isLocalTurnRotated.load();
+    if (!isRotated && y > 0.0) return;
+    if (isRotated && y < 0.0) return;
+
     // Identify local vs opponent: baselineId set at setupLocalStrikerBar is the local player's key.
     int knownLocal = s_localBaselineId.load();
     bool isLocalPlayer = (knownLocal == 0 || baselineId == knownLocal);
@@ -1328,7 +1363,10 @@ static void my_forceStrikerPosition(void* self, void* sel, int baselineId, doubl
         double minX = g_baselineMinX.load();
         double maxX = g_baselineMaxX.load();
         if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
-        double clampedX = std::clamp(x, minX, maxX);
+        
+        // Handle coordinate parity: when camera is rotated 180 degrees, table +X is screen left (-X)
+        double adjustedX = isRotated ? -x : x;
+        double clampedX = std::clamp(adjustedX, minX, maxX);
 
         g_liveStrikerX.store(clampedX);
         g_liveStrikerY.store(lockedY);
@@ -1385,10 +1423,13 @@ static MCPointDouble sampleLiveStrikerOnTable() {
                         double sx = *reinterpret_cast<double*>(&xBits);
                         double sy = *reinterpret_cast<double*>(&yBits);
                         if (!std::isnan(sx) && !std::isnan(sy) && std::abs(sx) <= 38.0 && std::abs(sy) <= 38.0) {
-                            // Strictly match the local player's striker on bottom baseline (sy < -15.0)
-                            if (sy < -15.0) {
+                            bool isRotated = s_isLocalTurnRotated.load();
+                            int knownLocal = s_localBaselineId.load();
+                            bool isTarget = (knownLocal != 0) ? (static_cast<int>(key) == knownLocal)
+                                                              : (isRotated ? (sy > 15.0) : (sy < -15.0));
+                            if (isTarget) {
                                 localNode = curr;
-                                localSx = sx;
+                                localSx = isRotated ? -sx : sx;
                                 localSy = -25.35;
                                 localKey = static_cast<int>(key);
                                 break;
@@ -1850,6 +1891,35 @@ static std::atomic<int> s_shotCount(0);
                   pm.predX, pm.predY, pm.predPot ? "YES" : "NO", pm.predDist);
         if (pm.actPot) {
             appendLog("     * Actual Final:     POCKETED (CLEAN POT!) | Actual Travel: %.2f cm", pm.actDist);
+            // Real-time automatic color rule learning from observed pot
+            if (pm.type == 1 || pm.type == 2) {
+                int shooter = tele.playerIndex;
+                int matchPlayers = s_totalMatchPlayers.load();
+                if (matchPlayers == 3) {
+                    // 3-Player match in Carrom Pool is ALWAYS Points/Disc Pool: ANY coin is valid!
+                    GraphicsEngine_SetAutoDetectedColor(3); // 3 = Any Coin
+                    ALOGI("[CatEngine] 3-PLAYER MATCH DETECTED: Set rule to ANY COIN (Points Mode)");
+                } else {
+                    // 1v1 or 2v2 Teams:
+                    // Dynamic team assignment:
+                    // If local player is known, our team matches local player's parity (e.g. 0 & 2 in 4-player, or shooter == localB)
+                    int localB = s_localBaselineId.load();
+                    if (localB < 0) localB = 0;
+                    bool isOurTeam = false;
+                    if (matchPlayers == 4) {
+                        // In 4-player / 2v2, team 1 = players 0 & 2, team 2 = players 1 & 3
+                        isOurTeam = ((shooter % 2) == (localB % 2));
+                    } else {
+                        // In 1v1, our team is simply shooter == localB
+                        isOurTeam = (shooter == localB);
+                    }
+                    int assignedColor = isOurTeam ? pm.type : (3 - pm.type);
+                    GraphicsEngine_SetAutoDetectedColor(assignedColor);
+                    ALOGI("[CatEngine] AUTO-LEARNED GAME COLOR RULE: Our Team is %s (from potted puck #%d by %s - Player %d, LocalPlayer=%d, MatchPlayers=%d)",
+                          (assignedColor == 2) ? "BLACK" : "WHITE", pm.id,
+                          isOurTeam ? "Our Team" : "Opponent Team", shooter, localB, matchPlayers);
+                }
+            }
         } else {
             appendLog("     * Actual Final:     (%.2f, %.2f) cm | Actual Travel: %.2f cm", pm.actX, pm.actY, pm.actDist);
         }
@@ -1878,6 +1948,18 @@ static std::atomic<int> s_shotCount(0);
         }
         if (maxPosErr > 2.5) {
             appendLog("     -> Max puck deviation was %.2f cm. Check table center calibration (X/Y) or cushion alignment.", maxPosErr);
+        }
+    }
+
+    // Train Real-Time Adaptive Physics Learning Engine on observed physical outcome
+    if (tele.hasFirstImpact && tele.firstContactPuckId >= 0) {
+        for (const auto& pm : matchResults) {
+            if (pm.id == tele.firstContactPuckId) {
+                catengine::ai::AdaptiveLearningEngine::getInstance().recordPostShotOutcomeAndTrain(
+                    pm.actX, pm.actY, pm.actPot, tele.strikerCushionBounces
+                );
+                break;
+            }
         }
     }
     appendLog("=======================================================================================================================");
@@ -2103,6 +2185,9 @@ static void my_onShotFired(void* this_ptr, int playerIndex, bool flag, unsigned 
     }
     s_isLocalTurnReady.store(false);
     s_lastPlayerIndex.store(playerIndex);
+    if (playerIndex >= 2 && s_totalMatchPlayers.load() < 4) {
+        s_totalMatchPlayers.store(4);
+    }
 
     int64_t shotNowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2942,7 +3027,11 @@ static void my_tl_moveStrikerSmooth(void* tableLogic, int baselineId, bool remot
         double minX = g_baselineMinX.load();
         double maxX = g_baselineMaxX.load();
         if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
-        double clampedX = std::clamp(x, minX, maxX);
+
+        // When match/baseline is rotated 180 degrees, table coordinates are inverted with respect to user's screen slider
+        bool isRotated = s_isLocalTurnRotated.load();
+        double adjustedX = isRotated ? -x : x;
+        double clampedX = std::clamp(adjustedX, minX, maxX);
 
         g_liveStrikerX.store(clampedX);
         g_liveStrikerY.store(lockedY);
@@ -2978,14 +3067,17 @@ extern "C" bool CatEngine_MoveStriker(double baselineX, double baselineY) {
     if (activeTc && isTableControllerAlive()) {
         int bId = s_localBaselineId.load();
         if (bId < 0) bId = 0;
+        bool isRotated = s_isLocalTurnRotated.load();
+        double targetGameX = isRotated ? -clampedX : clampedX;
+        double targetGameY = isRotated ? 25.35 : lockedY;
         uintptr_t tableLogicAddr = 0;
         if (safeReadPtr(reinterpret_cast<uintptr_t>(activeTc) + 0x3f0, &tableLogicAddr) && tableLogicAddr) {
             if (orig_tl_moveStrikerSmooth) {
-                orig_tl_moveStrikerSmooth(reinterpret_cast<void*>(tableLogicAddr), bId, false, clampedX, lockedY);
+                orig_tl_moveStrikerSmooth(reinterpret_cast<void*>(tableLogicAddr), bId, false, targetGameX, targetGameY);
             }
         }
         if (orig_forceStrikerPosition) {
-            orig_forceStrikerPosition(activeTc, nullptr, bId, clampedX, lockedY);
+            orig_forceStrikerPosition(activeTc, nullptr, bId, targetGameX, targetGameY);
         }
     }
 
@@ -3006,7 +3098,7 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
     }
     g_matchActive.store(true);
     setGraphicsMatchActive(true);
-    s_queenPuckId = -1;
+    // Note: Do NOT reset s_queenPuckId on each turn! Queen retains its identity throughout the entire match.
     int localB = s_localBaselineId.load();
     s_lastPlayerIndex.store((localB >= 0) ? localB : 0);
     g_baselineDiscovered.store(false);
@@ -3080,6 +3172,7 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
     // Turn is guaranteed to be local player's turn when setupLocalStrikerBar is invoked!
     g_matchActive.store(true);
     setGraphicsMatchActive(true);
+    s_isOpponentTurn.store(false);
     s_isLocalTurnReady.store(true);
     s_lastShotTimeMs.store(0);
     GraphicsEngine_OnStrikerReturnedToBaseline();
@@ -3098,8 +3191,10 @@ typedef void (*setupOpponentStrikerBar_fn)(void* self, void* sel);
 static setupOpponentStrikerBar_fn orig_setupOpponentStrikerBar = nullptr;
 
 static void my_setupOpponentStrikerBar(void* self, void* sel) {
+    s_isOpponentTurn.store(true);
     s_isLocalTurnReady.store(false);
     GraphicsEngine_ResetTurnScanTimer();
+    GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
     ALOGI("[GAME EVENT] >>> OPPONENT TURN STARTED (setupOpponentStrikerBar)! Auto-Shot paused. <<<");
     if (self) {
         s_capturedGameplayView = self;
@@ -3304,17 +3399,28 @@ static void startAutoShotWorker() {
             }
 
             // 4. Is it local player's turn?
+            if (s_isOpponentTurn.load()) {
+                if (shouldLogStatus) {
+                    s_lastAutoLogMs = nowMs;
+                    ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Opponent turn active (setupOpponentStrikerBar).");
+                }
+                stationaryStreak = 0;
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                continue;
+            }
+
             if (!s_isLocalTurnReady.load()) {
                 MCPointDouble curSt = sampleStrikerPosition();
-                if (isValidBaselineY(curSt.y)) {
+                // Strictly local bottom baseline (Y < -15.0 and Y > -35.0). Opponent top baseline is Y > +15.0!
+                if (curSt.y < -15.0 && curSt.y > -35.0) {
                     s_isLocalTurnReady.store(true);
                 } else {
                     if (shouldLogStatus) {
                         s_lastAutoLogMs = nowMs;
-                        ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Not local player's turn.");
+                        ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Local striker not in bottom baseline (Y=%.2f).", curSt.y);
                     }
                     stationaryStreak = 0;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
                     continue;
                 }
             }
@@ -3345,12 +3451,12 @@ static void startAutoShotWorker() {
                 continue;
             }
 
-            // 7. Check striker position - must be on local baseline
+            // 7. Check striker position - must be on local bottom baseline
             MCPointDouble curStriker = sampleStrikerPosition();
-            if (!isValidBaselineY(curStriker.y)) {
+            if (curStriker.y >= -15.0 || curStriker.y <= -35.0) {
                 if (shouldLogStatus) {
                     s_lastAutoLogMs = nowMs;
-                    ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Striker not on baseline yet.");
+                    ALOGI("[CatEngine] [AUTO-SHOT STATUS] Waiting: Striker not on local bottom baseline (Y=%.2f).", curStriker.y);
                 }
                 stationaryStreak = 0;
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));

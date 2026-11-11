@@ -45,10 +45,12 @@ Hook/BaseHook.cpp \
 JniHook/JniHook.cpp \
 catEngine/catEngine.cpp \
 catEngine/GraphicsEngine.cpp \
-catEngine/v2/PhysicsEngineV2.cpp
+catEngine/v2/PhysicsEngineV2.cpp \
+catEngine/v2/AdaptiveLearningEngine.cpp \
+catEngine/cv/BoardDetectionEngine.cpp
 
 LOCAL_C_INCLUDES += $(LOCAL_PATH)
-LOCAL_CFLAGS += -Wno-error=format-security -fvisibility=hidden -ffunction-sections -fdata-sections -w -std=c++17
+LOCAL_CFLAGS += -Wno-error=format-security -fvisibility=hidden -ffunction-sections -fdata-sections -w -std=c++20
 LOCAL_CPPFLAGS += -Wno-error=format-security -fvisibility=hidden -ffunction-sections -fdata-sections -w -Werror -fms-extensions
 LOCAL_LDFLAGS += -Wl,--gc-sections,--strip-all,-z,max-page-size=16384
 LOCAL_ARM_MODE := arm

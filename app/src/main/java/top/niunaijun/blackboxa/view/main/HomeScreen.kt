@@ -43,6 +43,7 @@ import top.niunaijun.blackboxa.util.DeviceManager
 import top.niunaijun.blackboxa.util.LicenseManager
 import top.niunaijun.blackboxa.view.apps.AppsViewModel
 import top.niunaijun.blackbox.widget.CatEngineComposeDialog
+import top.niunaijun.blackbox.widget.CatEngineLogManager
 import top.niunaijun.blackboxa.view.legal.FirstLaunchConsentDialog
 import top.niunaijun.blackboxa.view.legal.LegalDocType
 import top.niunaijun.blackboxa.view.legal.LegalDocViewerDialog
@@ -69,33 +70,7 @@ data class SupportedGameItem(
     val isAvailable: Boolean = true
 )
 
-fun openTelegram(context: Context, target: String) {
-    val fullUrl = if (target.startsWith("http://") || target.startsWith("https://")) {
-        target
-    } else {
-        "https://t.me/${target.removePrefix("@")}"
-    }
 
-    val tgUri = if (target.contains("?direct")) {
-        Uri.parse("tg://resolve?domain=catengine_news&direct")
-    } else if (target.startsWith("http://") || target.startsWith("https://")) {
-        Uri.parse(target)
-    } else {
-        Uri.parse("tg://resolve?domain=${target.removePrefix("@")}")
-    }
-
-    try {
-        val intent = Intent(Intent.ACTION_VIEW, tgUri)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
-    } catch (e: Exception) {
-        try {
-            val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fullUrl))
-            webIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(webIntent)
-        } catch (ignored: Exception) {}
-    }
-}
 
 @Composable
 fun HomeScreen(
@@ -161,16 +136,16 @@ fun HomeScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Top Header: [Cat Engine User Pill] ... [Telegram]
+            // Top Header: [Cat Engine User Pill] ... [Settings]
             CatTopBar(
                 title = "Cat Engine",
                 onLogoClick = { showCatEngineSettingsDialog = true },
-                onTelegramClick = { openTelegram(context, "@catengine_news") }
+                onSettingsClick = { showCatEngineSettingsDialog = true }
             )
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Main Content depending on Tab (0: Games, 1: Community/Chat, 2: Settings)
+            // Main Content depending on Tab (0: Games, 1: Engine Dashboard, 2: Settings)
             when (selectedTab) {
                 0 -> {
                     // Games Screen
@@ -184,8 +159,10 @@ fun HomeScreen(
                     )
                 }
                 1 -> {
-                    // Community / Chat Screen
-                    CommunityScreenTab()
+                    // Engine Dashboard & Live Telemetry
+                    EngineDashboardTab(
+                        onOpenSettings = { showCatEngineSettingsDialog = true }
+                    )
                 }
                 2 -> {
                     // Settings Screen
@@ -249,13 +226,13 @@ fun HomeScreen(
 
 /**
  * Top bar:
- * [ (UserIcon) Cat Engine ]                       [ Send / Telegram ]
+ * [ (UserIcon) Cat Engine ]                       [ Settings ]
  */
 @Composable
 private fun CatTopBar(
     title: String,
     onLogoClick: () -> Unit = {},
-    onTelegramClick: () -> Unit
+    onSettingsClick: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
@@ -289,14 +266,14 @@ private fun CatTopBar(
             )
         }
 
-        // Right Action Icon (Telegram only, bell icon removed)
+        // Right Action Icon (Cat Engine Settings)
         IconButton(
-            onClick = onTelegramClick,
+            onClick = onSettingsClick,
             modifier = Modifier.size(38.dp)
         ) {
             Icon(
-                imageVector = Icons.AutoMirrored.Outlined.Send,
-                contentDescription = "Official Telegram",
+                imageVector = Icons.Outlined.Tune,
+                contentDescription = "Cat Engine Settings",
                 tint = CatTextMuted,
                 modifier = Modifier.size(22.dp)
             )
@@ -628,12 +605,12 @@ private fun SettingsActionCard(
 }
 
 /**
- * Tab 1: Community / Chat Screen
- * Two boxes: Official Channel (@catengine_news) and Direct Support (https://t.me/catengine_news?direct).
- * Clicking either opens Telegram directly.
+ * Tab 1: Engine Dashboard & Telemetry Screen
  */
 @Composable
-private fun CommunityScreenTab() {
+private fun EngineDashboardTab(
+    onOpenSettings: () -> Unit
+) {
     val context = LocalContext.current
     Column(
         modifier = Modifier
@@ -642,17 +619,24 @@ private fun CommunityScreenTab() {
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         SettingsActionCard(
-            icon = Icons.AutoMirrored.Outlined.Send,
-            title = "Official Channel",
-            subtitle = "@catengine_news",
-            onClick = { openTelegram(context, "@catengine_news") }
+            icon = Icons.Outlined.CheckCircle,
+            title = "Engine Core Status",
+            subtitle = "Active & Calibrated (720x1612 Native Viewport)",
+            onClick = onOpenSettings
         )
 
         SettingsActionCard(
-            icon = Icons.Outlined.Chat,
-            title = "Direct Support",
-            subtitle = "t.me/catengine_news?direct",
-            onClick = { openTelegram(context, "https://t.me/catengine_news?direct") }
+            icon = Icons.Outlined.Psychology,
+            title = "Real-Time Adaptive AI",
+            subtitle = "Online Learning Active • Self-Tuning Friction & Force",
+            onClick = onOpenSettings
+        )
+
+        SettingsActionCard(
+            icon = Icons.Outlined.Description,
+            title = "Diagnostic Logs",
+            subtitle = "Export or Share Real-Time Gameplay Logs",
+            onClick = { CatEngineLogManager.shareLogs(context) }
         )
     }
 }
@@ -953,22 +937,7 @@ fun RedeemLicenseDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
 
-                // Telegram Support Button
-                OutlinedButton(
-                    onClick = { openTelegram(context, "https://t.me/catengine_news?direct") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, CatCardBorder),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF93C5FD))
-                ) {
-                    Icon(imageVector = Icons.AutoMirrored.Outlined.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "Get License on Telegram", fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                }
 
                 Spacer(modifier = Modifier.height(6.dp))
 
@@ -1113,22 +1082,7 @@ fun ServerMaintenanceDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
 
-                // Telegram Updates Button
-                OutlinedButton(
-                    onClick = { openTelegram(context, "@catengine_news") },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, CatCardBorder),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF93C5FD))
-                ) {
-                    Icon(imageVector = Icons.AutoMirrored.Outlined.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(text = "Check Updates on Telegram", fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                }
 
                 Spacer(modifier = Modifier.height(6.dp))
 

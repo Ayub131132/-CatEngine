@@ -31,6 +31,7 @@ object CatEngineConfig {
     private const val KEY_KEEP_LINE_AFTER_SHOT = "cat_keep_line_after_shot"
     private const val KEY_PHYSICS_ENGINE_MODE = "cat_physics_engine_mode"
     private const val KEY_FAST_FIRST_SHOT = "cat_fast_first_shot"
+    private const val KEY_TARGET_COLOR_MODE = "cat_target_color_mode"
 
     // Default Colors
     val DefaultStrikerColor = Color(0xFFFFFFFF)       // White
@@ -44,7 +45,7 @@ object CatEngineConfig {
         private set
     var showTable by mutableStateOf(false)
         private set
-    var lineThickness by mutableIntStateOf(4) // 1 to 10 (Default 4)
+    var lineThickness by mutableIntStateOf(2) // 1 to 10 (Default 2 = 0.25cm sleek laser line)
         private set
     var lineTransparency by mutableIntStateOf(10) // 1 to 10 (Default 10 = Fully Opaque)
         private set
@@ -56,11 +57,13 @@ object CatEngineConfig {
         private set
     var opponentPuckColor by mutableStateOf(DefaultOpponentPuckColor)
         private set
-    var keepLineAfterShot by mutableStateOf(true)
+    var keepLineAfterShot by mutableStateOf(false) // Default FALSE so stale lines clear after shot
         private set
     var physicsEngineMode by mutableIntStateOf(0) // 0 = Snake Engine CCD, 1 = In-Engine Native
         private set
     var fastFirstShotMode by mutableStateOf(false)
+        private set
+    var targetColorMode by mutableIntStateOf(0) // 0 = Auto, 1 = White, 2 = Black, 3 = Any
         private set
 
     private var isLoaded = false
@@ -95,9 +98,10 @@ object CatEngineConfig {
         val ocArgb = sp.getInt(KEY_OPPONENT_PUCK_COLOR, DefaultOpponentPuckColor.toArgb())
         opponentPuckColor = Color(ocArgb)
 
-        keepLineAfterShot = sp.getBoolean(KEY_KEEP_LINE_AFTER_SHOT, true)
+        keepLineAfterShot = sp.getBoolean(KEY_KEEP_LINE_AFTER_SHOT, false)
         physicsEngineMode = sp.getInt(KEY_PHYSICS_ENGINE_MODE, 0).coerceIn(0, 1)
         fastFirstShotMode = sp.getBoolean(KEY_FAST_FIRST_SHOT, false)
+        targetColorMode = sp.getInt(KEY_TARGET_COLOR_MODE, 0).coerceIn(0, 3)
         isLoaded = true
     }
 
@@ -113,8 +117,8 @@ object CatEngineConfig {
             NativeCore.setShowPocket(showPocket)
             NativeCore.setShowBorder(showTable)
 
-            // Line thickness mapping: 1 -> 0.15cm (very thin), 4 -> 0.60cm (default), 10 -> 1.50cm (very thick)
-            val thicknessCm = 0.15f + (lineThickness - 1) * 0.15f
+            // Line thickness mapping: 1 -> 0.12cm (very thin), 2 -> 0.22cm (default crisp), 10 -> 0.60cm
+            val thicknessCm = 0.12f + (lineThickness - 1) * 0.05f
             NativeCore.setGuidelineThickness(thicknessCm)
 
             // Line transparency mapping: 1 -> 0.10f, 10 -> 1.00f
@@ -134,6 +138,7 @@ object CatEngineConfig {
             NativeCore.setKeepLineAfterShot(keepLineAfterShot)
             NativeCore.setPhysicsEngineMode(physicsEngineMode)
             NativeCore.setFastFirstShotMode(fastFirstShotMode)
+            NativeCore.setTargetColorMode(targetColorMode)
         } catch (t: Throwable) {
             android.util.Log.e("CatEngineConfig", "Failed to apply settings to native engine", t)
         }
@@ -259,5 +264,26 @@ object CatEngineConfig {
         try {
             NativeCore.setFastFirstShotMode(enabled)
         } catch (ignored: Throwable) {}
+    }
+
+    fun updateTargetColorMode(context: Context, mode: Int) {
+        val clamped = mode.coerceIn(0, 4)
+        targetColorMode = clamped
+        getPrefs(context).edit().putInt(KEY_TARGET_COLOR_MODE, clamped).apply()
+        try {
+            NativeCore.setTargetColorMode(clamped)
+        } catch (ignored: Throwable) {}
+    }
+
+    fun getAutoDetectedColor(): Int {
+        return try { NativeCore.getAutoDetectedColor() } catch (t: Throwable) { 0 }
+    }
+
+    fun getMatchPlayerCount(): Int {
+        return try { NativeCore.getMatchPlayerCount() } catch (t: Throwable) { 2 }
+    }
+
+    fun isLocalTurnReady(): Boolean {
+        return try { NativeCore.isLocalTurnReady() } catch (t: Throwable) { false }
     }
 }

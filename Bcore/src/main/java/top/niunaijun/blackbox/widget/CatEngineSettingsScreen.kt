@@ -80,8 +80,8 @@ fun CatEngineSettingsScreen(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Section 1: Main Toggles & Switches
-                SectionTitle(title = "Aiming & Display Switches")
+                // Section 1: Aiming & Prediction
+                SectionTitle(title = "Aiming & Prediction")
 
                 // Show Prediction switch (Default ON)
                 SettingSwitchRow(
@@ -90,16 +90,22 @@ fun CatEngineSettingsScreen(
                     onCheckedChange = { CatEngineConfig.updateShowPrediction(context, it) }
                 )
 
+                // Target Coin Filter (Auto, White, Black, Any)
+                TargetColorModeSelector(
+                    selectedMode = CatEngineConfig.targetColorMode,
+                    onModeSelected = { CatEngineConfig.updateTargetColorMode(context, it) }
+                )
+
                 // Show Pocket switch
                 SettingSwitchRow(
-                    title = "Show Pocket",
+                    title = "Show Pocket Guides",
                     checked = CatEngineConfig.showPocket,
                     onCheckedChange = { CatEngineConfig.updateShowPocket(context, it) }
                 )
 
                 // Show Table switch
                 SettingSwitchRow(
-                    title = "Show Table",
+                    title = "Show Table Border",
                     checked = CatEngineConfig.showTable,
                     onCheckedChange = { CatEngineConfig.updateShowTable(context, it) }
                 )
@@ -188,11 +194,11 @@ fun CatEngineSettingsScreen(
                 SectionTitle(title = "Diagnostics & Support")
 
                 SettingActionRow(
-                    title = "Share Logs to Support",
-                    subtitle = "Open Telegram (@catengine_owner) with log file attached",
+                    title = "Export Diagnostic Logs",
+                    subtitle = "Share or save catengine_logs.txt diagnostic file",
                     buttonText = "Share Logs",
                     onClick = {
-                        CatEngineLogManager.shareLogsToTelegram(context)
+                        CatEngineLogManager.shareLogs(context)
                     }
                 )
 
@@ -357,10 +363,12 @@ private fun SettingSliderRow(
     displayValue: String,
     onValueChange: (Float) -> Unit
 ) {
+    var localPos by remember(value) { mutableFloatStateOf(value) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp)
+            .padding(vertical = 4.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -370,7 +378,7 @@ private fun SettingSliderRow(
             Text(
                 text = title,
                 color = TextPrimary,
-                fontSize = 15.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Medium
             )
 
@@ -383,9 +391,9 @@ private fun SettingSliderRow(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = displayValue,
+                    text = "${localPos.roundToInt()}",
                     color = AccentBlue,
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -394,8 +402,9 @@ private fun SettingSliderRow(
         Spacer(modifier = Modifier.height(2.dp))
 
         Slider(
-            value = value,
-            onValueChange = onValueChange,
+            value = localPos,
+            onValueChange = { localPos = it },
+            onValueChangeFinished = { onValueChange(localPos) },
             valueRange = valueRange,
             steps = steps,
             colors = SliderDefaults.colors(
@@ -405,6 +414,163 @@ private fun SettingSliderRow(
             ),
             modifier = Modifier.fillMaxWidth()
         )
+    }
+}
+
+@Composable
+private fun TargetColorModeSelector(
+    selectedMode: Int,
+    onModeSelected: (Int) -> Unit
+) {
+    var matchPlayers by remember { mutableIntStateOf(CatEngineConfig.getMatchPlayerCount()) }
+    var detectedColor by remember { mutableIntStateOf(CatEngineConfig.getAutoDetectedColor()) }
+    var isLocalTurn by remember { mutableStateOf(CatEngineConfig.isLocalTurnReady()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            matchPlayers = CatEngineConfig.getMatchPlayerCount()
+            detectedColor = CatEngineConfig.getAutoDetectedColor()
+            isLocalTurn = CatEngineConfig.isLocalTurnReady()
+            kotlinx.coroutines.delay(300)
+        }
+    }
+
+    val modesRow1 = listOf(
+        0 to "Auto",
+        4 to "2v2 Teams",
+        3 to "Any Coin"
+    )
+    val modesRow2 = listOf(
+        1 to "White Only",
+        2 to "Black Only"
+    )
+
+    val matchDesc = when (matchPlayers) {
+        4 -> if (selectedMode == 3) "4-Player Disc Pool (Free-For-All)" else "2v2 Team Match (4 Players)"
+        3 -> "3-Player Points Match (Any Coin)"
+        else -> "1v1 Match (2 Players)"
+    }
+
+    val colorDesc = when {
+        selectedMode == 1 -> "Enforcing WHITE Coins"
+        selectedMode == 2 -> "Enforcing BLACK Coins"
+        selectedMode == 3 || matchPlayers == 3 -> "ANY COIN Allowed (Points/Freestyle)"
+        detectedColor == 1 -> "Auto: Our Team is WHITE"
+        detectedColor == 2 -> "Auto: Our Team is BLACK"
+        else -> "Auto: Auto-detecting on first pot"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        // Live Game State Card
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = Color(0xFF141726),
+            border = BorderStroke(1.dp, Color(0xFF232840))
+        ) {
+            Column(modifier = Modifier.padding(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = matchDesc,
+                        color = AccentBlue,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (isLocalTurn) "YOUR TURN" else "WAITING TURN",
+                        color = if (isLocalTurn) AccentGreen else Color(0xFFF59E0B),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = colorDesc,
+                    color = TextSecondary,
+                    fontSize = 11.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "Match Target Rules & Filtering",
+            color = TextPrimary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Row 1: Auto, 2v2 Teams, Any Coin
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            modesRow1.forEach { (modeId, label) ->
+                val isSelected = (selectedMode == modeId)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) AccentBlue else Color(0xFF1E2235))
+                        .border(
+                            BorderStroke(1.dp, if (isSelected) AccentBlue else Color(0xFF282C40)),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onModeSelected(modeId) }
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        color = if (isSelected) Color(0xFF0F111D) else TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Row 2: White Only, Black Only
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            modesRow2.forEach { (modeId, label) ->
+                val isSelected = (selectedMode == modeId)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) AccentBlue else Color(0xFF1E2235))
+                        .border(
+                            BorderStroke(1.dp, if (isSelected) AccentBlue else Color(0xFF282C40)),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onModeSelected(modeId) }
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        color = if (isSelected) Color(0xFF0F111D) else TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
     }
 }
 

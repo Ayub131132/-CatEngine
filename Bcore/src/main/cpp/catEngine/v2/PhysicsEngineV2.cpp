@@ -1,17 +1,28 @@
+#define _USE_MATH_DEFINES
 #include "PhysicsEngineV2.h"
 #include <cmath>
 #include <vector>
 #include <algorithm>
-#include <android/log.h>
 #include <chrono>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#ifdef __ANDROID__
+#include <android/log.h>
 #ifndef LOG_TAG
 #define LOG_TAG "CatEngine-V2"
 #endif
-
 #define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define ALOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#else
+#include <cstdio>
+#define ALOGI(...) do { printf("[INFO] " __VA_ARGS__); printf("\n"); } while(0)
+#define ALOGW(...) do { printf("[WARN] " __VA_ARGS__); printf("\n"); } while(0)
+#define ALOGE(...) do { fprintf(stderr, "[ERROR] " __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#endif
 
 namespace catengine {
 namespace v2 {
@@ -58,6 +69,241 @@ struct BodyInternal {
     int cushionBounces = 0;
     std::vector<TrajectorySegment> segments;
 };
+
+static inline bool resolveDiscDiscContact(BodyInternal& bi, BodyInternal& bj,
+                                          const PhysicsConfig& config,
+                                          SimResult& result,
+                                          bool recordSegments) {
+    if (bi.inPocket || bj.inPocket) return false;
+
+    double cdx = bi.px - bj.px;
+    double cdy = bi.py - bj.py;
+    double dist = std::hypot(cdx, cdy);
+    double minDist = bi.radius + bj.radius;
+    if (dist < 1e-6) {
+        cdx = 1.0; cdy = 0.0; dist = 1e-6;
+    }
+
+    double nx = cdx / dist; // Unit normal pointing from j to i
+    double ny = cdy / dist;
+
+    // 1. Overlap separation by exact inverse mass ratio (libgame.so 0x1998840)
+    double delta = minDist - dist;
+    if (delta > 0.0) {
+        double shift = delta / dist;
+        double m1 = bi.mass;
+        double m2 = bj.mass;
+        double mSum = m1 + m2;
+        bi.px += cdx * shift * (m2 / mSum);
+        bi.py += cdy * shift * (m2 / mSum);
+        bj.px -= cdx * shift * (m1 / mSum);
+        bj.py -= cdy * shift * (m1 / mSum);
+    }
+
+    // 2. Relative normal velocity (bi relative to bj):
+    // v1n = bi.v . n, v2n = bj.v . n
+    double v1n = bi.vx * nx + bi.vy * ny;
+    double v2n = bj.vx * nx + bj.vy * ny;
+    double relNorm = v1n - v2n;
+
+    // If bodies are separating along the contact normal, do not apply attractive impulse
+    if (relNorm >= -1e-5) {
+        return false;
+    }
+
+    // 3. Authentic spin transfer (libgame.so 0x1998a8c)
+    double tx = -ny;
+    double ty = nx;
+    double v1t = bi.vx * tx + bi.vy * ty;
+    double v2t = bj.vx * tx + bj.vy * ty;
+
+    // Contact slip for Body 1
+    double v_slip1 = v1t - bi.wz * bi.radius;
+    double sgn1 = (v_slip1 > 0.0) ? 1.0 : -1.0;
+    double J1 = std::min(0.40 * std::abs(v1n), std::abs(v_slip1) / 2.5);
+    bi.wz += (2.5 * J1 * sgn1) / bi.radius;
+
+    // Contact slip for Body 2
+    double v_slip2 = v2t - bj.wz * bj.radius;
+    double sgn2 = (v_slip2 > 0.0) ? 1.0 : -1.0;
+    double J2 = std::min(0.40 * std::abs(v2n), std::abs(v_slip2) / 2.5);
+    bj.wz += (2.5 * J2 * sgn2) / bj.radius;
+
+    // 4. 1D Elastic Normal Momentum Exchange
+    double m1 = bi.mass;
+    double m2 = bj.mass;
+    double mSum = m1 + m2;
+    double e = (config.restitutionBody > 0.0 && config.restitutionBody <= 1.0) ? config.restitutionBody : 1.00;
+
+    double v1n_prime = (m1 * v1n + m2 * v2n - m2 * e * relNorm) / mSum;
+    double v2n_prime = (m1 * v1n + m2 * v2n + m1 * e * relNorm) / mSum;
+
+    // Reconstruct post-collision Cartesian velocities
+    bi.vx = v1n_prime * nx + v1t * tx;
+    bi.vy = v1n_prime * ny + v1t * ty;
+
+    bj.vx = v2n_prime * nx + v2t * tx;
+    bj.vy = v2n_prime * ny + v2t * ty;
+
+    bi.r_omega = std::hypot(bi.vx, bi.vy);
+    bj.r_omega = std::hypot(bj.vx, bj.vy);
+
+    // Equilibrium spin alignment to maintain pure rolling post-collision
+    bi.wx = bi.vy / bi.radius;
+    bi.wy = -bi.vx / bi.radius;
+    bj.wx = bj.vy / bj.radius;
+    bj.wy = -bj.vx / bj.radius;
+
+    bi.lastSegAngle = std::atan2(bi.vy, bi.vx);
+    bj.lastSegAngle = std::atan2(bj.vy, bj.vx);
+
+    double spd1 = std::hypot(bi.vx, bi.vy);
+    double spd2 = std::hypot(bj.vx, bj.vy);
+
+    // 5. Track impact speed and causality
+    if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
+        bj.hitByEntityId = (bi.id == -1) ? 0 : bi.id;
+        bj.hitSpeed = spd1;
+    } else if (bj.chainLevel >= 0 && bi.chainLevel == -1) {
+        bi.hitByEntityId = (bj.id == -1) ? 0 : bj.id;
+        bi.hitSpeed = spd2;
+    } else {
+        if (spd1 >= spd2) {
+            if (bj.hitByEntityId == -1) {
+                bj.hitByEntityId = (bi.id == -1) ? 0 : bi.id;
+                bj.hitSpeed = spd1;
+            }
+        } else {
+            if (bi.hitByEntityId == -1) {
+                bi.hitByEntityId = (bj.id == -1) ? 0 : bj.id;
+                bi.hitSpeed = spd2;
+            }
+        }
+    }
+
+    // 6. Chain level assignment
+    if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
+        bj.chainLevel = bi.chainLevel + 1;
+        if (bj.segments.empty()) {
+            bj.segStartX = bj.px;
+            bj.segStartY = bj.py;
+        }
+    } else if (bj.chainLevel >= 0 && bi.chainLevel == -1) {
+        bi.chainLevel = bj.chainLevel + 1;
+        if (bi.segments.empty()) {
+            bi.segStartX = bi.px;
+            bi.segStartY = bi.py;
+        }
+    }
+
+    // 7. Striker first impact record
+    if (bi.id == -1 && !result.hasFirstContact) {
+        result.hasFirstContact = true;
+        result.firstImpactStrikerX = static_cast<float>(bi.px);
+        result.firstImpactStrikerY = static_cast<float>(bi.py);
+        result.firstImpactPuckX    = static_cast<float>(bj.px);
+        result.firstImpactPuckY    = static_cast<float>(bj.py);
+        result.firstContactPuckId  = bj.id;
+
+        if (recordSegments) {
+            TrajectorySegment seg;
+            seg.startX = static_cast<float>(bi.segStartX);
+            seg.startY = static_cast<float>(bi.segStartY);
+            seg.endX   = static_cast<float>(bi.px);
+            seg.endY   = static_cast<float>(bi.py);
+            seg.isCushionBounce = (bi.segments.size() > 0);
+            seg.isPuckHit = true;
+            bi.segments.push_back(seg);
+            bi.segStartX = bi.px;
+            bi.segStartY = bi.py;
+        }
+    } else if (recordSegments) {
+        if (bi.id == -1 || bi.chainLevel >= 1) {
+            double distI = std::hypot(bi.px - bi.segStartX, bi.py - bi.segStartY);
+            if (distI > 0.10) {
+                TrajectorySegment seg;
+                seg.startX = static_cast<float>(bi.segStartX);
+                seg.startY = static_cast<float>(bi.segStartY);
+                seg.endX   = static_cast<float>(bi.px);
+                seg.endY   = static_cast<float>(bi.py);
+                seg.isCushionBounce = false;
+                seg.isPuckHit = true;
+                bi.segments.push_back(seg);
+                bi.segStartX = bi.px;
+                bi.segStartY = bi.py;
+            }
+        }
+        if (bj.id != -1 && bj.chainLevel >= 1) {
+            double distJ = std::hypot(bj.px - bj.segStartX, bj.py - bj.segStartY);
+            if (distJ > 0.10) {
+                TrajectorySegment seg;
+                seg.startX = static_cast<float>(bj.segStartX);
+                seg.startY = static_cast<float>(bj.segStartY);
+                seg.endX   = static_cast<float>(bj.px);
+                seg.endY   = static_cast<float>(bj.py);
+                seg.isCushionBounce = false;
+                seg.isPuckHit = true;
+                bj.segments.push_back(seg);
+                bj.segStartX = bj.px;
+                bj.segStartY = bj.py;
+            }
+        }
+    }
+
+    return true;
+}
+
+static inline void resolveCushionBounce(BodyInternal& b, double thetaCushion,
+                                        const PhysicsConfig& config,
+                                        bool recordSegments) {
+    if (b.inPocket) return;
+
+    double cosTh = std::cos(thetaCushion);
+    double sinTh = std::sin(thetaCushion);
+
+    double vt = b.vx * cosTh - b.vy * sinTh;
+    double vn = b.vx * sinTh + b.vy * cosTh;
+
+    // Contact point tangential slip: v_slip = vt - wz * R (libgame.so 0x1998b90 FMSUB)
+    double v_slip = vt - b.wz * b.radius;
+    double sgnSlip = (v_slip > 0.0) ? 1.0 : -1.0;
+    double Jt = std::min(0.40 * std::abs(vn), std::abs(v_slip) / 2.5);
+    double delta_vt = -sgnSlip * Jt;
+
+    // Authentic TableLogic + 0x1b0 table cushion damping (libgame.so 0x1998bc4 & 0x1998bcc)
+    double e_body = (config.restitutionBody > 0.0) ? config.restitutionBody : 1.00;
+    double vn_prime = -vn * e_body * config.restitutionCushion;
+    double vt_prime = vt + (delta_vt / 2.5);
+    b.wz -= (2.5 * delta_vt) / b.radius;
+
+    // Rotated velocities back into world coordinates (libgame.so 0x1998c10 & 0x1998c14)
+    b.vx = cosTh * vt_prime + sinTh * vn_prime;
+    b.vy = cosTh * vn_prime - sinTh * vt_prime;
+
+    // Authentic cushion angular momentum update & rolling equilibrium
+    b.wx = b.vy / b.radius;
+    b.wy = -b.vx / b.radius;
+
+    b.r_omega = std::hypot(b.vx, b.vy);
+    b.lastSegAngle = std::atan2(b.vy, b.vx);
+    b.cushionBounces++;
+
+    if (recordSegments) {
+        double dCush = std::hypot(b.px - b.segStartX, b.py - b.segStartY);
+        if (dCush > 0.12) {
+            TrajectorySegment seg;
+            seg.startX = static_cast<float>(b.segStartX);
+            seg.startY = static_cast<float>(b.segStartY);
+            seg.endX   = static_cast<float>(b.px);
+            seg.endY   = static_cast<float>(b.py);
+            seg.isCushionBounce = true;
+            seg.isPuckHit = false;
+            b.segments.push_back(seg);
+            b.segStartX = b.px;
+            b.segStartY = b.py;
+        }
+    }
+}
 
 static inline bool isPuckAlreadyPotted(double x, double y, double inset, double captureRad) {
     if (std::isnan(x) || std::isnan(y)) return true;
@@ -187,7 +433,7 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
 
         double timeLeft = dt;
         int subStep = 0;
-        const int maxSubSteps = 32;
+        const int maxSubSteps = 64;
 
         while (timeLeft > 1e-6 && subStep < maxSubSteps) {
             subStep++;
@@ -330,6 +576,32 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
                         }
                     }
                 }
+            }
+
+            // Immediate multi-body cluster contact solver:
+            // When multiple pucks touch or overlap at t <= 1e-8, resolve all contacting pairs
+            // iteratively so momentum transfers throughout the cluster in a single substep.
+            if (earliestT <= 1e-8 && eventType == 1) {
+                for (int iter = 0; iter < 10; ++iter) {
+                    bool anyImpulse = false;
+                    for (size_t i = 0; i < bodies.size(); i++) {
+                        if (bodies[i].inPocket) continue;
+                        for (size_t j = i + 1; j < bodies.size(); j++) {
+                            if (bodies[j].inPocket) continue;
+                            double cdx = bodies[i].px - bodies[j].px;
+                            double cdy = bodies[i].py - bodies[j].py;
+                            double dSq = cdx * cdx + cdy * cdy;
+                            double rSum = bodies[i].radius + bodies[j].radius;
+                            if (dSq <= (rSum + 0.05) * (rSum + 0.05)) {
+                                if (resolveDiscDiscContact(bodies[i], bodies[j], config, result, true)) {
+                                    anyImpulse = true;
+                                }
+                            }
+                        }
+                    }
+                    if (!anyImpulse && iter > 0) break;
+                }
+                continue;
             }
 
             // -------------------------------------------------------------
@@ -530,275 +802,48 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
             // Resolve Collision Event
             // -------------------------------------------------------------
             if (eventType == 1) {
-                // Disc-to-disc contact (libgame.so 0x1998840)
-                auto& bi = bodies[eventI];
-                auto& bj = bodies[eventJ];
-                if (!bi.inPocket && !bj.inPocket) {
-                    double cdx = bi.px - bj.px;
-                    double cdy = bi.py - bj.py;
-                    double dist = std::hypot(cdx, cdy);
-                    double minDist = bi.radius + bj.radius;
-                    if (dist < 1e-6) {
-                        cdx = 1.0; cdy = 0.0; dist = 1e-6;
-                    }
-
-                    double nx = cdx / dist;
-                    double ny = cdy / dist;
-                    double theta = std::atan2(cdy, cdx);
-
-                    // 1. Authentic spin transfer for Body 1 (theta1 = -pi/2 - theta) (libgame.so 0x1998a8c)
-                    {
-                        double th1 = -1.5707963267948966 - theta;
-                        double cos1 = std::cos(th1);
-                        double sin1 = std::sin(th1);
-                        double v1t = bi.vx * cos1 - bi.vy * sin1;
-                        double v1n = bi.vx * sin1 + bi.vy * cos1;
-                        double v_slip1 = v1t - bi.wz * bi.radius;
-                        double sgn1 = (v_slip1 > 0.0) ? 1.0 : -1.0;
-                        double J1 = std::min(0.4 * std::abs(v1n), std::abs(v_slip1) / 2.5);
-                        bi.wz += (2.5 * J1 * sgn1) / bi.radius;
-                    }
-
-                    // Tangential spin transfer for Body 2 (theta2 = pi/2 - theta) (libgame.so 0x1998a8c)
-                    {
-                        double th2 = 1.5707963267948966 - theta;
-                        double cos2 = std::cos(th2);
-                        double sin2 = std::sin(th2);
-                        double v2t = bj.vx * cos2 - bj.vy * sin2;
-                        double v2n = bj.vx * sin2 + bj.vy * cos2;
-                        double v_slip2 = v2t - bj.wz * bj.radius;
-                        double sgn2 = (v_slip2 > 0.0) ? 1.0 : -1.0;
-                        double J2 = std::min(0.4 * std::abs(v2n), std::abs(v_slip2) / 2.5);
-                        bj.wz += (2.5 * J2 * sgn2) / bj.radius;
-                    }
-
-                    // 2. Overlap separation by exact inverse mass ratio (libgame.so 0x1998840 lines 57-69)
-                    double delta = minDist - dist;
-                    if (delta > 0.0) {
-                        double shift = delta / dist;
-                        double m1 = bi.mass;
-                        double m2 = bj.mass;
-                        double mSum = m1 + m2;
-                        bi.px += cdx * shift * (m2 / mSum);
-                        bi.py += cdy * shift * (m2 / mSum);
-                        bj.px -= cdx * shift * (m1 / mSum);
-                        bj.py -= cdy * shift * (m1 / mSum);
-                    }
-
-                    // 3. 1D Elastic Normal Velocity Exchange (libgame.so 0x1998840 lines 70-146)
-                    double spd1 = std::hypot(bi.vx, bi.vy);
-                    double spd2 = std::hypot(bj.vx, bj.vy);
-                    double alpha1 = std::atan2(bi.vy, bi.vx);
-                    double alpha2 = std::atan2(bj.vy, bj.vx);
-
-                    double u1n = spd1 * std::cos(alpha1 - theta);
-                    double u1t = spd1 * std::sin(alpha1 - theta);
-                    double u2n = spd2 * std::cos(alpha2 - theta);
-                    double u2t = spd2 * std::sin(alpha2 - theta);
-
-                    // Exchange normal momentum: RelNorm check (bi moving towards bj in normal frame)
-                    if (u1n - u2n < 1e-4) {
-                        double m1 = bi.mass;
-                        double m2 = bj.mass;
-                        double mSum = m1 + m2;
-                        double e = (config.restitutionBody > 0.0 && config.restitutionBody <= 1.0) ? config.restitutionBody : 1.00;
-
-                        double u1n_prime = (m1 * u1n + m2 * u2n - m2 * e * (u1n - u2n)) / mSum;
-                        double u2n_prime = (m1 * u1n + m2 * u2n + m1 * e * (u1n - u2n)) / mSum;
-
-                        // Authentic Carrom Pool libgame.so (0x1998840 lines 70-146):
-                        // Inter-disc linear collision is pure 1D normal momentum exchange.
-                        // Tangential velocities along the contact tangent are 100% preserved.
-                        double cosTh = std::cos(theta);
-                        double sinTh = std::sin(theta);
-
-                        bi.vx = u1n_prime * cosTh - u1t * sinTh;
-                        bi.vy = u1n_prime * sinTh + u1t * cosTh;
-
-                        bj.vx = u2n_prime * cosTh - u2t * sinTh;
-                        bj.vy = u2n_prime * sinTh + u2t * cosTh;
-
-                        bi.r_omega = std::hypot(bi.vx, bi.vy);
-                        bj.r_omega = std::hypot(bj.vx, bj.vy);
-
-                        // Authentic Carrom Pool equilibrium: align angular velocity with post-collision velocity
-                        // to prevent artificial gyroscopic slip curvature across subsequent sub-steps.
-                        bi.wx = bi.vy / bi.radius;
-                        bi.wy = -bi.vx / bi.radius;
-                        bj.wx = bj.vy / bj.radius;
-                        bj.wy = -bj.vx / bj.radius;
-
-                        bi.lastSegAngle = std::atan2(bi.vy, bi.vx);
-                        bj.lastSegAngle = std::atan2(bj.vy, bj.vx);
-                    }
-
-                    // Track impact speed and causality based on moving vs resting states
-                    if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
-                        // bi was moving and hit stationary bj
-                        bj.hitByEntityId = (bi.id == -1) ? 0 : bi.id;
-                        bj.hitSpeed = spd1;
-                    } else if (bj.chainLevel >= 0 && bi.chainLevel == -1) {
-                        // bj was moving and hit stationary bi
-                        bi.hitByEntityId = (bj.id == -1) ? 0 : bj.id;
-                        bi.hitSpeed = spd2;
-                    } else {
-                        // Both were moving (secondary collision)
-                        if (spd1 >= spd2) {
-                            if (bj.hitByEntityId == -1) {
-                                bj.hitByEntityId = (bi.id == -1) ? 0 : bi.id;
-                                bj.hitSpeed = spd1;
-                            }
-                        } else {
-                            if (bi.hitByEntityId == -1) {
-                                bi.hitByEntityId = (bj.id == -1) ? 0 : bj.id;
-                                bi.hitSpeed = spd2;
-                            }
-                        }
-                    }
-
-                        // Chain level assignment
-                        if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
-                            bj.chainLevel = bi.chainLevel + 1;
-                            if (bj.segments.empty()) {
-                                bj.segStartX = bj.px;
-                                bj.segStartY = bj.py;
-                            }
-                        } else if (bj.chainLevel >= 0 && bi.chainLevel == -1) {
-                            bi.chainLevel = bj.chainLevel + 1;
-                            if (bi.segments.empty()) {
-                                bi.segStartX = bi.px;
-                                bi.segStartY = bi.py;
-                            }
-                        }
-
-                        // Striker first impact record
-                        if (bi.id == -1 && !result.hasFirstContact) {
-                            result.hasFirstContact = true;
-                            result.firstImpactStrikerX = static_cast<float>(bi.px);
-                            result.firstImpactStrikerY = static_cast<float>(bi.py);
-                            result.firstImpactPuckX    = static_cast<float>(bj.px);
-                            result.firstImpactPuckY    = static_cast<float>(bj.py);
-                            result.firstContactPuckId  = bj.id;
-
-                            TrajectorySegment seg;
-                            seg.startX = static_cast<float>(bi.segStartX);
-                            seg.startY = static_cast<float>(bi.segStartY);
-                            seg.endX   = static_cast<float>(bi.px);
-                            seg.endY   = static_cast<float>(bi.py);
-                            seg.isCushionBounce = (bi.segments.size() > 0);
-                            seg.isPuckHit = true;
-                            bi.segments.push_back(seg);
-                            bi.segStartX = bi.px;
-                            bi.segStartY = bi.py;
-                        } else if (bi.id == -1) {
-                            TrajectorySegment seg;
-                            seg.startX = static_cast<float>(bi.segStartX);
-                            seg.startY = static_cast<float>(bi.segStartY);
-                            seg.endX   = static_cast<float>(bi.px);
-                            seg.endY   = static_cast<float>(bi.py);
-                            seg.isCushionBounce = false;
-                            seg.isPuckHit = true;
-                            bi.segments.push_back(seg);
-                            bi.segStartX = bi.px;
-                            bi.segStartY = bi.py;
-                        } else if (bi.chainLevel >= 1) {
-                            double distI = std::hypot(bi.px - bi.segStartX, bi.py - bi.segStartY);
-                            if (distI > 0.15) {
-                                TrajectorySegment seg;
-                                seg.startX = static_cast<float>(bi.segStartX);
-                                seg.startY = static_cast<float>(bi.segStartY);
-                                seg.endX   = static_cast<float>(bi.px);
-                                seg.endY   = static_cast<float>(bi.py);
-                                seg.isCushionBounce = false;
-                                seg.isPuckHit = true;
-                                bi.segments.push_back(seg);
-                                bi.segStartX = bi.px;
-                                bi.segStartY = bi.py;
-                            }
-                        }
-
-                        if (bj.chainLevel >= 1 && bj.id != -1) {
-                            double distJ = std::hypot(bj.px - bj.segStartX, bj.py - bj.segStartY);
-                            if (distJ > 0.15) {
-                                TrajectorySegment seg;
-                                seg.startX = static_cast<float>(bj.segStartX);
-                                seg.startY = static_cast<float>(bj.segStartY);
-                                seg.endX   = static_cast<float>(bj.px);
-                                seg.endY   = static_cast<float>(bj.py);
-                                seg.isCushionBounce = false;
-                                seg.isPuckHit = true;
-                                bj.segments.push_back(seg);
-                                bj.segStartX = bj.px;
-                                bj.segStartY = bj.py;
-                            }
-                        }
-                    }
+                resolveDiscDiscContact(bodies[eventI], bodies[eventJ], config, result, true);
             } else if (eventType == 2) {
-                // Authentic cushion bounce with spin coupling (libgame.so 0x1998B2C)
-                auto& b = bodies[eventI];
-                if (!b.inPocket) {
-                    double thetaCushion = eventCushionNormalAngle;
-
-                    double cosTh = std::cos(thetaCushion);
-                    double sinTh = std::sin(thetaCushion);
-
-                    double vt = b.vx * cosTh - b.vy * sinTh;
-                    double vn = b.vx * sinTh + b.vy * cosTh;
-
-                    // Contact point tangential slip: v_slip = vt - wz * R (libgame.so 0x1998b90 FMSUB)
-                    double v_slip = vt - b.wz * b.radius;
-                    double sgnSlip = (v_slip > 0.0) ? 1.0 : -1.0;
-                    double Jt = std::min(0.4 * std::abs(vn), std::abs(v_slip) / 2.5);
-                    double delta_vt = -sgnSlip * Jt;
-
-                    // Authentic TableLogic + 0x1b0 table cushion damping (libgame.so 0x1998bc4 & 0x1998bcc)
-                    // vn_prime = -vn * e_body * e_cushion; vt_prime = vt + (delta_vt / 2.5)
-                    double e_body = (config.restitutionBody > 0.0) ? config.restitutionBody : 1.00;
-                    double vn_prime = -vn * e_body * config.restitutionCushion;
-                    double vt_prime = vt + (delta_vt / 2.5);
-                    b.wz -= (2.5 * delta_vt) / b.radius;
-
-                    // Rotated velocities back into world coordinates (libgame.so 0x1998c10 & 0x1998c14)
-                    b.vx = cosTh * vt_prime + sinTh * vn_prime;
-                    b.vy = cosTh * vn_prime - sinTh * vt_prime;
-
-                    // Authentic cushion angular momentum update & rolling equilibrium
-                    // Align surface angular velocity with post-rebound linear velocity to maintain pure rolling
-                    b.wx = b.vy / b.radius;
-                    b.wy = -b.vx / b.radius;
-
-                    b.r_omega = std::hypot(b.vx, b.vy);
-                    b.lastSegAngle = std::atan2(b.vy, b.vx);
-                    b.cushionBounces++;
-
-                    double dCush = std::hypot(b.px - b.segStartX, b.py - b.segStartY);
-                    if (dCush > 0.15) {
-                        TrajectorySegment seg;
-                        seg.startX = static_cast<float>(b.segStartX);
-                        seg.startY = static_cast<float>(b.segStartY);
-                        seg.endX   = static_cast<float>(b.px);
-                        seg.endY   = static_cast<float>(b.py);
-                        seg.isCushionBounce = true;
-                        seg.isPuckHit = false;
-                        b.segments.push_back(seg);
-                        b.segStartX = b.px;
-                        b.segStartY = b.py;
-                    }
-                }
+                resolveCushionBounce(bodies[eventI], eventCushionNormalAngle, config, true);
             } else {
                 break;
             }
         }
 
-        // If timeLeft remains after subSteps, advance positions so physical simulation time never stalls in clusters
+        // If timeLeft remains after subSteps, advance positions with micro-steps and overlap depenetration
         if (timeLeft > 1e-6) {
-            for (auto& b : bodies) {
-                if (b.inPocket) continue;
-                double spd = std::hypot(b.vx, b.vy);
-                if (spd > minSpeed) {
-                    b.px += b.vx * timeLeft;
-                    b.py += b.vy * timeLeft;
-                    b.distTraveled += spd * timeLeft;
+            const double microDt = std::min(timeLeft, 0.00025);
+            int microSteps = static_cast<int>(std::ceil(timeLeft / microDt));
+            for (int ms = 0; ms < microSteps; ms++) {
+                double curMicro = std::min(microDt, timeLeft - ms * microDt);
+                if (curMicro <= 1e-7) break;
+                for (auto& b : bodies) {
+                    if (b.inPocket) continue;
+                    double spd = std::hypot(b.vx, b.vy);
+                    if (spd > minSpeed) {
+                        b.px += b.vx * curMicro;
+                        b.py += b.vy * curMicro;
+                        b.distTraveled += spd * curMicro;
+                    }
+                }
+                for (size_t i = 0; i < bodies.size(); i++) {
+                    if (bodies[i].inPocket) continue;
+                    for (size_t j = i + 1; j < bodies.size(); j++) {
+                        if (bodies[j].inPocket) continue;
+                        double cdx = bodies[i].px - bodies[j].px;
+                        double cdy = bodies[i].py - bodies[j].py;
+                        double dist = std::hypot(cdx, cdy);
+                        double minDist = bodies[i].radius + bodies[j].radius;
+                        if (dist < minDist && dist > 1e-6) {
+                            double delta = minDist - dist;
+                            double shift = delta / dist;
+                            double mSum = bodies[i].mass + bodies[j].mass;
+                            bodies[i].px += cdx * shift * (bodies[j].mass / mSum);
+                            bodies[i].py += cdy * shift * (bodies[j].mass / mSum);
+                            bodies[j].px -= cdx * shift * (bodies[i].mass / mSum);
+                            bodies[j].py -= cdy * shift * (bodies[i].mass / mSum);
+                        }
+                    }
                 }
             }
         }
