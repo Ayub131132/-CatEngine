@@ -356,6 +356,7 @@ static uintptr_t s_knownControlsVtable = 0;
 static std::atomic<bool> s_isInEngineAimActive(false);
 static std::atomic<bool> s_isLocalTurnReady(false);
 static std::atomic<bool> s_isOpponentTurn(false);
+static std::atomic<bool> s_isLocalTurnRotated(false); // True when local player is assigned top baseline (table is rotated 180 deg)
 static std::atomic<int>  s_localBaselineId(0);
 static std::atomic<int>  s_lastPlayerIndex(0);
 static std::atomic<int>  s_totalMatchPlayers(2); // 2 = 1v1, 3 = 3-player, 4 = 4-player/2v2
@@ -518,6 +519,7 @@ static void* findTableControllerFromMatchController(void* mc) {
 static void CatEngine_OnMatchDestroyed() {
     g_matchActive.store(false);
     s_isLocalTurnReady.store(false);
+    s_isLocalTurnRotated.store(false);
     setGraphicsMatchActive(false);
     GraphicsEngine_ResetNativeAffine();
     s_isInEngineAimActive.store(false);
@@ -660,12 +662,16 @@ static void updateBaselineFromTableLogic(void* tc) {
     if (cands.empty()) return;
     s_totalMatchPlayers.store(static_cast<int>(cands.size()));
 
-    // Select the local player's baseline: ALWAYS bottom baseline (y in [-35.0, -15.0]) in mobile view
+    // Select the local player's baseline:
+    // If targetKey was learned from setupLocalStrikerBar / my_tl_moveStrikerSmooth, match that candidate.
+    // If targetKey is a top baseline (y > 0.0), the game has rotated the camera 180 degrees so that
+    // top appears at the bottom of the device screen. In that case, dragging left on device screen
+    // decreases screen coordinate, which maps to -X in table space if inverted.
     const BaselineCand* selected = nullptr;
     int targetKey = s_localBaselineId.load();
     if (targetKey >= 0) {
         for (const auto& c : cands) {
-            if (c.key == targetKey && c.y < -15.0 && c.y > -35.0) {
+            if (c.key == targetKey) {
                 selected = &c;
                 break;
             }
@@ -681,6 +687,8 @@ static void updateBaselineFromTableLogic(void* tc) {
     }
     if (!selected && !cands.empty()) selected = &cands[0];
 
+    bool isRotated = (selected->y > 0.0);
+    s_isLocalTurnRotated.store(isRotated);
     s_localBaselineId.store(selected->key);
     s_lastPlayerIndex.store(selected->key);
     g_baselineMinX.store(selected->minX);
@@ -690,8 +698,8 @@ static void updateBaselineFromTableLogic(void* tc) {
     g_liveStrikerY.store(lockedY);
     GraphicsEngine_SetBaselineRange(static_cast<float>(selected->minX), static_cast<float>(selected->maxX));
     g_baselineDiscovered.store(true);
-    ALOGI("[CatEngine] AUTHENTIC LOCAL BASELINE DISCOVERED: Key=%d, Y=%.3f cm (top=%s), Sliding Range: [%.3f, %.3f] cm (fromPoints=%d)",
-          selected->key, lockedY, lockedY > 0.0 ? "YES" : "NO", selected->minX, selected->maxX, selected->hasRange ? 1 : 0);
+    ALOGI("[CatEngine] AUTHENTIC LOCAL BASELINE DISCOVERED: Key=%d, Y=%.3f cm (top=%s, rotated=%s), Sliding Range: [%.3f, %.3f] cm (fromPoints=%d)",
+          selected->key, selected->y, selected->y > 0.0 ? "YES" : "NO", isRotated ? "TRUE" : "FALSE", selected->minX, selected->maxX, selected->hasRange ? 1 : 0);
 }
 
 // Discover authentic Pocket, Striker, and Puck geometry directly from TableLogic
@@ -1332,10 +1340,15 @@ static void my_forceStrikerPosition(void* self, void* sel, int baselineId, doubl
     }
 
     // STRICT ISOLATION: Never process or store opponent striker positions!
-    // Local player baseline is strictly at the bottom (-25.35 cm).
-    if (!s_isLocalTurnReady.load() || y > 0.0) {
+    // If table view is not rotated, local baseline is at y < 0.0.
+    // If table view is rotated 180 deg (local baseline is top), y > 0.0 is the local player!
+    if (!s_isLocalTurnReady.load()) {
         return;
     }
+    bool isRotated = s_isLocalTurnRotated.load();
+    if (!isRotated && y > 0.0) return;
+    if (isRotated && y < 0.0) return;
+
     // Identify local vs opponent: baselineId set at setupLocalStrikerBar is the local player's key.
     int knownLocal = s_localBaselineId.load();
     bool isLocalPlayer = (knownLocal == 0 || baselineId == knownLocal);
@@ -1350,7 +1363,10 @@ static void my_forceStrikerPosition(void* self, void* sel, int baselineId, doubl
         double minX = g_baselineMinX.load();
         double maxX = g_baselineMaxX.load();
         if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
-        double clampedX = std::clamp(x, minX, maxX);
+        
+        // Handle coordinate parity: when camera is rotated 180 degrees, table +X is screen left (-X)
+        double adjustedX = isRotated ? -x : x;
+        double clampedX = std::clamp(adjustedX, minX, maxX);
 
         g_liveStrikerX.store(clampedX);
         g_liveStrikerY.store(lockedY);
@@ -1407,10 +1423,13 @@ static MCPointDouble sampleLiveStrikerOnTable() {
                         double sx = *reinterpret_cast<double*>(&xBits);
                         double sy = *reinterpret_cast<double*>(&yBits);
                         if (!std::isnan(sx) && !std::isnan(sy) && std::abs(sx) <= 38.0 && std::abs(sy) <= 38.0) {
-                            // Strictly match the local player's striker on bottom baseline (sy < -15.0)
-                            if (sy < -15.0) {
+                            bool isRotated = s_isLocalTurnRotated.load();
+                            int knownLocal = s_localBaselineId.load();
+                            bool isTarget = (knownLocal != 0) ? (static_cast<int>(key) == knownLocal)
+                                                              : (isRotated ? (sy > 15.0) : (sy < -15.0));
+                            if (isTarget) {
                                 localNode = curr;
-                                localSx = sx;
+                                localSx = isRotated ? -sx : sx;
                                 localSy = -25.35;
                                 localKey = static_cast<int>(key);
                                 break;
@@ -1882,14 +1901,23 @@ static std::atomic<int> s_shotCount(0);
                     ALOGI("[CatEngine] 3-PLAYER MATCH DETECTED: Set rule to ANY COIN (Points Mode)");
                 } else {
                     // 1v1 or 2v2 Teams:
-                    // In 2v2, Player 0 & Player 2 are Team 1 (Our Team)
-                    // In 1v1, Player 0 is Our Team
-                    bool isOurTeam = (shooter == 0 || (matchPlayers == 4 && shooter == 2));
+                    // Dynamic team assignment:
+                    // If local player is known, our team matches local player's parity (e.g. 0 & 2 in 4-player, or shooter == localB)
+                    int localB = s_localBaselineId.load();
+                    if (localB < 0) localB = 0;
+                    bool isOurTeam = false;
+                    if (matchPlayers == 4) {
+                        // In 4-player / 2v2, team 1 = players 0 & 2, team 2 = players 1 & 3
+                        isOurTeam = ((shooter % 2) == (localB % 2));
+                    } else {
+                        // In 1v1, our team is simply shooter == localB
+                        isOurTeam = (shooter == localB);
+                    }
                     int assignedColor = isOurTeam ? pm.type : (3 - pm.type);
                     GraphicsEngine_SetAutoDetectedColor(assignedColor);
-                    ALOGI("[CatEngine] AUTO-LEARNED GAME COLOR RULE: Our Team is %s (from potted puck #%d by %s - Player %d, MatchPlayers=%d)",
+                    ALOGI("[CatEngine] AUTO-LEARNED GAME COLOR RULE: Our Team is %s (from potted puck #%d by %s - Player %d, LocalPlayer=%d, MatchPlayers=%d)",
                           (assignedColor == 2) ? "BLACK" : "WHITE", pm.id,
-                          isOurTeam ? "Our Team" : "Opponent Team", shooter, matchPlayers);
+                          isOurTeam ? "Our Team" : "Opponent Team", shooter, localB, matchPlayers);
                 }
             }
         } else {
@@ -2999,7 +3027,11 @@ static void my_tl_moveStrikerSmooth(void* tableLogic, int baselineId, bool remot
         double minX = g_baselineMinX.load();
         double maxX = g_baselineMaxX.load();
         if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
-        double clampedX = std::clamp(x, minX, maxX);
+
+        // When match/baseline is rotated 180 degrees, table coordinates are inverted with respect to user's screen slider
+        bool isRotated = s_isLocalTurnRotated.load();
+        double adjustedX = isRotated ? -x : x;
+        double clampedX = std::clamp(adjustedX, minX, maxX);
 
         g_liveStrikerX.store(clampedX);
         g_liveStrikerY.store(lockedY);
@@ -3035,14 +3067,17 @@ extern "C" bool CatEngine_MoveStriker(double baselineX, double baselineY) {
     if (activeTc && isTableControllerAlive()) {
         int bId = s_localBaselineId.load();
         if (bId < 0) bId = 0;
+        bool isRotated = s_isLocalTurnRotated.load();
+        double targetGameX = isRotated ? -clampedX : clampedX;
+        double targetGameY = isRotated ? 25.35 : lockedY;
         uintptr_t tableLogicAddr = 0;
         if (safeReadPtr(reinterpret_cast<uintptr_t>(activeTc) + 0x3f0, &tableLogicAddr) && tableLogicAddr) {
             if (orig_tl_moveStrikerSmooth) {
-                orig_tl_moveStrikerSmooth(reinterpret_cast<void*>(tableLogicAddr), bId, false, clampedX, lockedY);
+                orig_tl_moveStrikerSmooth(reinterpret_cast<void*>(tableLogicAddr), bId, false, targetGameX, targetGameY);
             }
         }
         if (orig_forceStrikerPosition) {
-            orig_forceStrikerPosition(activeTc, nullptr, bId, clampedX, lockedY);
+            orig_forceStrikerPosition(activeTc, nullptr, bId, targetGameX, targetGameY);
         }
     }
 
