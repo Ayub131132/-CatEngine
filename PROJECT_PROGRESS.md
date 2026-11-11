@@ -22,8 +22,9 @@
 | **Phase 5** | Polished UI & User Experience (Jetpack Compose, Overlays) | **Completed** | Nov 11, 2026 |
 | **Phase 6** | Comprehensive Testing (Unit, Native, Android Device, Perf) | **Completed** | Nov 11, 2026 |
 | **Phase 7** | Working Build Delivery for User Testing (APK + Test Plan) | **Completed** | Nov 11, 2026 |
-| **Phase 8** | Feedback Remediation & Iterative Approval Loop | **In Progress** | Awaiting User Testing |
-| **Phase 9** | Final Repository Verification, Git Commit & Branch Push | **Pending** | After User Approval |
+| **Phase 8** | Device Live Testing & In-Container Verification | **Completed** | Nov 11, 2026 |
+| **Phase 9** | Feedback Remediation & Iterative Approval Loop | **In Progress** | Awaiting User Testing |
+| **Phase 10** | Final Repository Verification, Git Commit & Branch Push | **Pending** | After User Approval |
 
 ---
 
@@ -98,6 +99,11 @@
 | Nov 11 12:23 | Phase 2 | Extracted `Module-1491.so` | `llvm-objdump -d` at hook RVAs | Verified all 4 AArch64 prologues |
 | Nov 11 12:31 | Phase 1 | Full APK assembly | `./gradlew :app:assembleDebug` | Passed (3m 2s), APK generated (22.48 MB) |
 | Nov 11 12:32 | Phase 1 | 16KB Page alignment audit | `llvm-readelf -l libengine.so` | Verified `Align 0x4000` (16KB compliant) |
+| Nov 11 12:55 | Phase 6 | Standalone C++ Physics Suite | `test_physics_engine.exe` | 7/7 PASSED (100%) |
+| Nov 11 13:05 | Phase 6 | Standalone C++ CV Suite | `test_board_detection.exe` | 3/3 PASSED (100%) |
+| Nov 11 13:13 | Phase 8 | Device Installation on Vivo T3 Lite | `adb install -r -d` | SUCCESS (Streamed install) |
+| Nov 11 13:14 | Phase 8 | Live Activity & Native Hook Telemetry | Logcat audit (PID 30546) | 8/8 Hooks verified, GLES Shaders initialized |
+| Nov 11 13:16 | Phase 8 | In-Container Carrom Launch | `dumpsys window` focus audit | `CarromActivity` loaded via `ProxyActivity$P0` |
 | Nov 11 12:38 | Phase 1 | Created branch `feature/catengine-complete-implementation` | `git status` | Clean branch established |
 | Nov 11 12:43 | Phase 0 | Reorganized docs, tools, .gitignore, README | `git commit` (ddc3ea0) | Clean repository commit |
 | Nov 11 12:47 | Phase 6 | Authored `tests/physics/test_physics_engine.cpp` | `test_physics_engine.exe` | 7/7 PASSED (100%) |
