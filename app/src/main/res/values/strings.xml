@@ -9,7 +9,7 @@
     <string name="filter">Filter</string>
     <string name="open_source_path">Open Source</string>
     <string name="xp_setting">Xposed Setting</string>
-    <string name="tg_group">Telegram Group</string>
+    <string name="tg_group">Community</string>
     <string name="fake_location">Fake Location(Preview)</string>
     <string name="real_location">Real Location</string>
     <string name="set_location">Set Fake Location Successfully:%1$s-%2$s</string>

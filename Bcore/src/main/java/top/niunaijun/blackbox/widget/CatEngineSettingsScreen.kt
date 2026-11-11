@@ -194,11 +194,11 @@ fun CatEngineSettingsScreen(
                 SectionTitle(title = "Diagnostics & Support")
 
                 SettingActionRow(
-                    title = "Share Logs to Support",
-                    subtitle = "Open Telegram (@catengine_owner) with log file attached",
+                    title = "Export Diagnostic Logs",
+                    subtitle = "Share or save catengine_logs.txt diagnostic file",
                     buttonText = "Share Logs",
                     onClick = {
-                        CatEngineLogManager.shareLogsToTelegram(context)
+                        CatEngineLogManager.shareLogs(context)
                     }
                 )
 

@@ -21,7 +21,7 @@ import java.util.concurrent.Executors
  * High-performance, robust logging system for CatEngine.
  * - Stores every application, native CatEngine, and crash log to `catengine_logs.txt`.
  * - Strictly enforces 50 MB maximum size limit: deletes and starts a new file if limit exceeded.
- * - Provides seamless "Share Logs to Support" intent targeting Telegram (@catengine_owner).
+ * - Provides seamless "Share Logs" intent using standard Android Share menu.
  */
 object CatEngineLogManager {
     private const val TAG = "CatEngineLog"
@@ -144,9 +144,9 @@ object CatEngineLogManager {
     }
 
     /**
-     * Share logs directly to support via Telegram (@catengine_owner) with file attached.
+     * Share logs via standard Android system share menu.
      */
-    fun shareLogsToTelegram(context: Context) {
+    fun shareLogs(context: Context) {
         try {
             val file = getLogFile(context)
             if (!file.exists() || file.length() == 0L) {
@@ -167,47 +167,21 @@ object CatEngineLogManager {
             val sendIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_TEXT, "CatEngine log file for support assistance (@catengine_owner)")
+                putExtra(Intent.EXTRA_SUBJECT, "CatEngine Diagnostic Log")
+                putExtra(Intent.EXTRA_TEXT, "CatEngine Diagnostic & Telemetry Log")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+            val chooser = Intent.createChooser(sendIntent, "Share CatEngine Logs").apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-
-            val telegramPackages = listOf(
-                "org.telegram.messenger",
-                "org.telegram.plus",
-                "org.thunderdog.challegram",
-                "org.telegram.messenger.web"
-            )
-
-            var opened = false
-            for (pkg in telegramPackages) {
-                try {
-                    val pm = context.packageManager
-                    pm.getPackageInfo(pkg, 0)
-                    sendIntent.setPackage(pkg)
-                    context.startActivity(sendIntent)
-                    opened = true
-                    break
-                } catch (ignored: Exception) {}
-            }
-
-            if (!opened) {
-                // Try chooser if specific telegram package intent failed
-                sendIntent.setPackage(null)
-                val chooser = Intent.createChooser(sendIntent, "Send Log File to Telegram Support (@catengine_owner)").apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(chooser)
-            }
+            context.startActivity(chooser)
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to share logs to Telegram", t)
-            // Fallback: Open Telegram support chat directly
-            try {
-                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/catengine_owner")).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(browserIntent)
-            } catch (ignored: Throwable) {}
+            Log.e(TAG, "Failed to share logs", t)
         }
+    }
+
+    fun shareLogsToTelegram(context: Context) {
+        shareLogs(context)
     }
 }

@@ -108,7 +108,7 @@ THE SOFTWARE IS PROVIDED ON AN "AS IS" AND "AS AVAILABLE" BASIS, WITHOUT WARRANT
 TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE DEVELOPERS, CONTRIBUTORS, OR DISTRIBUTORS OF CAT ENGINE BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES (INCLUDING LOSS OF PROFITS, DATA, USE, GOODWILL, OR IN-GAME ASSETS), EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
 9. SEVERABILITY & MODIFICATIONS
-If any provision of these Terms is determined to be unlawful or unenforceable, that provision shall be severed without affecting the validity and enforceability of any remaining provisions. We reserve the right to amend these Terms at any time by updating them within the Software or through our official Telegram communication channels.
+If any provision of these Terms is determined to be unlawful or unenforceable, that provision shall be severed without affecting the validity and enforceability of any remaining provisions. We reserve the right to amend these Terms at any time by updating them within the Software.
 """.trimIndent()
 
 val PRIVACY_POLICY_TEXT = """
@@ -152,13 +152,13 @@ Collected technical parameters are used solely for:
 API requests are made over secure TLS (HTTPS) to our configured backend endpoints (including Cloudflare secure edge infrastructure). We do not sell, rent, or trade your device key or technical metadata to third-party data brokers or advertising networks.
 
 5. DATA RETENTION AND DELETION
-Device keys and interaction timestamps are stored in secure server logs. If you wish to delete your device key registration from our server database, you may submit a request directly through our official Telegram direct link (https://t.me/catengine_news?direct) with your 10-digit Device Key, and the entry will be permanently removed within 72 hours.
+Device keys and interaction timestamps are stored in secure logs. If you wish to delete your device registration, you may reset app data in system settings.
 
 6. COMPLIANCE WITH GLOBAL PRIVACY REGULATIONS
-Cat Engine respects user privacy rights under the European General Data Protection Regulation (GDPR), the California Consumer Privacy Act (CCPA), and India's Digital Personal Data Protection Act (DPDP). Because no personal names or communications are logged, processing is limited strictly to legitimate technological authentication.
+Cat Engine respects user privacy rights under global privacy standards (GDPR, CCPA). Because no personal names or communications are logged, processing is limited strictly to legitimate technological authentication.
 
 7. CONTACT
-For privacy inquiries, questions, or data removal requests, contact our official support via Telegram: https://t.me/catengine_news?direct or join @catengine_news.
+For privacy inquiries, questions, or diagnostic feedback, consult the in-app Diagnostics & Support settings.
 """.trimIndent()
 
 val DISCLAIMER_TEXT = """

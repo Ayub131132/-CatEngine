@@ -147,20 +147,33 @@ void AdaptiveLearningEngine::loadModel() {
 
         std::string line;
         while (std::getline(ifs, line)) {
-            if (line.find("totalShotsLearned") != std::string::npos) {
-                sscanf(line.c_str(), "%*[^0-9]%d", &m_params.totalShotsLearned);
-            } else if (line.find("confidenceScore") != std::string::npos) {
-                sscanf(line.c_str(), "%*[^0-9.]%f", &m_params.confidenceScore);
-            } else if (line.find("cushionRestitution") != std::string::npos) {
-                sscanf(line.c_str(), "%*[^0-9.]%f", &m_params.cushionRestitution);
-            } else if (line.find("tableFriction") != std::string::npos) {
-                sscanf(line.c_str(), "%*[^0-9.]%f", &m_params.tableFriction);
-            } else if (line.find("cutThrowFactor") != std::string::npos) {
-                sscanf(line.c_str(), "%*[^0-9.]%f", &m_params.cutThrowFactor);
-            } else if (line.find("aimBiasCorrection") != std::string::npos) {
-                sscanf(line.c_str(), "%*[^0-9.-]%f", &m_params.aimBiasCorrection);
-            } else if (line.find("forceScaleFactor") != std::string::npos) {
-                sscanf(line.c_str(), "%*[^0-9.]%f", &m_params.forceScaleFactor);
+            size_t colon = line.find(':');
+            if (colon != std::string::npos) {
+                try {
+                    std::string valStr = line.substr(colon + 1);
+                    valStr.erase(std::remove(valStr.begin(), valStr.end(), ','), valStr.end());
+                    valStr.erase(std::remove(valStr.begin(), valStr.end(), ' '), valStr.end());
+                    valStr.erase(std::remove(valStr.begin(), valStr.end(), '\r'), valStr.end());
+                    valStr.erase(std::remove(valStr.begin(), valStr.end(), '\n'), valStr.end());
+
+                    if (line.find("totalShotsLearned") != std::string::npos) {
+                        m_params.totalShotsLearned = std::stoi(valStr);
+                    } else if (line.find("confidenceScore") != std::string::npos) {
+                        m_params.confidenceScore = std::stof(valStr);
+                    } else if (line.find("cushionRestitution") != std::string::npos) {
+                        m_params.cushionRestitution = std::stof(valStr);
+                    } else if (line.find("tableFriction") != std::string::npos) {
+                        m_params.tableFriction = std::stof(valStr);
+                    } else if (line.find("cutThrowFactor") != std::string::npos) {
+                        m_params.cutThrowFactor = std::stof(valStr);
+                    } else if (line.find("pocketCaptureRadius") != std::string::npos) {
+                        m_params.pocketCaptureRadius = std::stof(valStr);
+                    } else if (line.find("aimBiasCorrection") != std::string::npos) {
+                        m_params.aimBiasCorrection = std::stof(valStr);
+                    } else if (line.find("forceScaleFactor") != std::string::npos) {
+                        m_params.forceScaleFactor = std::stof(valStr);
+                    }
+                } catch (...) {}
             }
         }
         ifs.close();

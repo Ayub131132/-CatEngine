@@ -183,6 +183,7 @@ static std::atomic<int>    s_targetColorMode(0); // 0 = Auto, 1 = White Only, 2 
 static std::atomic<int>    s_autoDetectedColor(0); // 0 = Undecided/Auto, 1 = White, 2 = Black, 3 = Any Puck
 
 extern "C" bool CatEngine_GetLiveStrikerPos(double* outX, double* outY);
+extern "C" float CatEngine_GetTurnRemainingSeconds();
 
 struct TablePuckEntry {
     int id = -1;
@@ -769,7 +770,7 @@ static AimSimulationResult simulateStrikerTrajectoryUniversal(double startX, dou
     const float stRadius = s_strikerRadius.load();
     const float pkRadius = s_puckRadius.load();
     const float pkInset  = s_pocketInset.load();
-    const float pkRad    = s_pocketRadius.load();
+    float pkRad          = s_pocketRadius.load();
 
     double fClamped = std::clamp(forceVal, 0.0, 1.0);
     double minP = s_minPower.load();
@@ -787,6 +788,9 @@ static AimSimulationResult simulateStrikerTrajectoryUniversal(double startX, dou
     auto learnedAI = catengine::ai::AdaptiveLearningEngine::getInstance().getLearnedParameters();
     if (learnedAI.totalShotsLearned > 0) {
         v0 *= learnedAI.forceScaleFactor;
+        if (learnedAI.pocketCaptureRadius > pkRad) {
+            pkRad = learnedAI.pocketCaptureRadius;
+        }
     }
 
     // 2. Setup bodies
@@ -1043,7 +1047,7 @@ static AimSimulationResult simulateStrikerTrajectoryUniversal(double startX, dou
                     if (curSpd > 0.15) {
                         double muTable = (b.id == -1) ? s_strikerFriction.load() : s_puckFriction.load();
                         if (learnedAI.totalShotsLearned > 0) {
-                            muTable = (b.id == -1) ? (learnedAI.tableFriction * 0.90) : learnedAI.tableFriction;
+                            muTable = (b.id == -1) ? (learnedAI.tableFriction * 1.48) : learnedAI.tableFriction;
                         }
                         if (muTable < 0.0001) muTable = 0.0001;
                         double dv = muTable * gDecel * advanceDt;
@@ -1387,6 +1391,18 @@ static AimSimulationResult simulateStrikerTrajectoryV2(double startX, double sta
     cfg.puckMass = s_puckMass.load();
     cfg.pocketDropMaxSpeed = s_pocketDropMaxSpeed.load();
     cfg.pocketGravity = s_pocketGravity.load();
+
+    // Incorporate real-time AI adaptive physics parameters
+    auto learnedAI = catengine::ai::AdaptiveLearningEngine::getInstance().getLearnedParameters();
+    if (learnedAI.totalShotsLearned > 0) {
+        cfg.powerMultiplier *= learnedAI.forceScaleFactor;
+        cfg.strikerFriction = learnedAI.tableFriction * 1.48; // Striker has higher friction ratio
+        cfg.puckFriction = learnedAI.tableFriction;
+        cfg.restitutionCushion = learnedAI.cushionRestitution;
+        if (learnedAI.pocketCaptureRadius > cfg.pocketRadius) {
+            cfg.pocketRadius = learnedAI.pocketCaptureRadius;
+        }
+    }
 
     {
         std::lock_guard<std::mutex> lock(s_polyMutex);
@@ -1784,6 +1800,10 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         int targetMode = s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any
         if (targetMode == 0) {
             targetMode = s_autoDetectedColor.load(); // Dynamic real-time auto detection
+        }
+        if (targetMode == 0) {
+            // Infer from player's active baseline (curY > 0.0 means top baseline = Black, curY <= 0.0 means bottom baseline = White)
+            targetMode = (curY > 0.0) ? 2 : 1;
         }
         bool isIllegalTarget = false;
         int targetPuckType = -1;
@@ -2991,15 +3011,16 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
     if (targetMode == 0) {
         targetMode = s_autoDetectedColor.load();
     }
+    if (targetMode == 0) {
+        targetMode = isTopBaseline ? 2 : 1;
+    }
     auto isTargetAllowed = [&](int puckType) -> bool {
         if (puckType == 3) return true; // Queen always targetable
         if (targetMode == 1) return (puckType == 1); // White only
         if (targetMode == 2) return (puckType == 2); // Black only
         if (targetMode == 3) return true; // Any puck (Freestyle / Disc Pool)
-        // Auto mode (0): if undecided, allow whichever color user targets
-        if (countWhite > 0 && countBlack > 0) return true;
-        if (countWhite > 0) return (puckType == 1);
-        if (countBlack > 0) return (puckType == 2);
+        if (countWhite > 0 && countBlack == 0) return (puckType == 1);
+        if (countBlack > 0 && countWhite == 0) return (puckType == 2);
         return true;
     };
 
@@ -3243,7 +3264,7 @@ select_shot:
     s_isActivelySearching.store(false);
 
     // Direct priority hierarchy with Lowest Risk scoring:
-    // Tier 1 direct > Tier 2 bank > Tier 3 combo
+    // Tier 1 direct > Tier 2 bank > Tier 3 combo > Tier 4 Safety Turn Passer
     if (hasTier1) {
         bestShot = bestTier1;
         foundShot = true;
@@ -3254,15 +3275,89 @@ select_shot:
         bestShot = bestTier3;
         foundShot = true;
     } else {
-        return false;
+        // Tier 4: Safety Placement / Turn Passer shot to prevent timeout foul!
+        float remSec = CatEngine_GetTurnRemainingSeconds();
+        if (remSec <= 6.0f || !targets.empty()) {
+            CandidateShot bestSafety;
+            bool hasSafety = false;
+            double bestSafetyScore = -999999.0;
+
+            for (double candX = minX + 1.5; candX <= maxX - 1.5; candX += 3.5) {
+                for (const auto& tgt : targets) {
+                    if (!isTargetAllowed(tgt.puckType)) continue;
+
+                    double ax = tgt.x - candX;
+                    double ay = tgt.y - baselineY;
+                    double dApp = std::hypot(ax, ay);
+                    if (dApp < 1.0) continue;
+
+                    double aimAngle = std::atan2(ay, ax);
+                    double safeForce = 0.50; // Controlled gentle shot to break cluster and pass turn safely
+
+                    AimSimulationResult sim = simulateStrikerTrajectory(candX, baselineY, aimAngle, safeForce, 1500);
+
+                    // Safety verification invariants:
+                    // 1. Striker MUST NOT scratch into any pocket!
+                    if (sim.strikerInPocket) continue;
+                    // 2. Opponent puck MUST NOT be pocketed!
+                    bool opponentPocketed = false;
+                    for (const auto& traj : sim.puckTrajectories) {
+                        if (traj.inPocket && !isTargetAllowed(traj.puckType)) {
+                            opponentPocketed = true;
+                            break;
+                        }
+                    }
+                    if (opponentPocketed) continue;
+
+                    double safetyScore = 50000.0 - (dApp * 200.0);
+                    if (!hasSafety || safetyScore > bestSafetyScore) {
+                        bestSafety.candX = candX;
+                        bestSafety.candY = baselineY;
+                        bestSafety.angleRad = aimAngle;
+                        bestSafety.forceVal = safeForce;
+                        bestSafety.tier = 4;
+                        bestSafety.score = safetyScore;
+                        bestSafety.targetPuckId = tgt.id;
+                        bestSafety.targetPuckType = tgt.puckType;
+                        bestSafety.puckStartX = tgt.x;
+                        bestSafety.puckStartY = tgt.y;
+                        bestSafety.predLandingX = tgt.x + 2.0;
+                        bestSafety.predLandingY = tgt.y + 2.0;
+                        bestSafety.potted = false;
+                        bestSafety.pocketId = -1;
+                        bestSafety.cushionCount = 0;
+                        bestSafety.secondaryHits = 0;
+                        bestSafety.cutAngleDeg = 0.0;
+                        bestSafetyScore = safetyScore;
+                        hasSafety = true;
+                    }
+                }
+            }
+
+            if (hasSafety) {
+                bestShot = bestSafety;
+                foundShot = true;
+                ALOGI("[AUTO-SHOT] Executing Tier 4 Safety / Turn Passer (Timer=%.1fs, Force=%.2f) to avoid timeout foul!",
+                      remSec, bestShot.forceVal);
+            }
+        }
+
+        if (!foundShot) {
+            return false;
+        }
     }
 
 execute_selected_shot:
     s_isActivelySearching.store(false);
 
-    // Auto-shot strictly requires a confirmed pocketing shot (Tier 1-3 only)
-    if (!foundShot || bestShot.tier > 3 || !bestShot.potted || bestShot.pocketId < 0 || bestShot.pocketId >= 4) {
+    // Auto-shot requires either a confirmed pocketing shot (Tier 1-3) or a validated Safety Shot (Tier 4)
+    if (!foundShot) {
         return false;
+    }
+    if (bestShot.tier <= 3) {
+        if (!bestShot.potted || bestShot.pocketId < 0 || bestShot.pocketId >= 4) {
+            return false;
+        }
     }
 
     // 100% Precision Multi-Step Refinement pass: fine-tune angle directly into dead center of pocket
