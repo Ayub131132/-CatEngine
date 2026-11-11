@@ -26,25 +26,25 @@ static const float kBoardHalfSize       = 37.0f;
 static const float kBaselineY           = -25.35f;
 static const float kOpponentBaselineY   = 25.35f;
 
-static std::atomic<float> s_strikerRadius(2.65f);
-static std::atomic<float> s_puckRadius(1.95f);
-static std::atomic<float> s_pocketRadius(2.65f);
-std::atomic<float> s_pocketInset(33.48f);
-static std::atomic<bool>  s_hasUserPocketRadius(false);
-static std::atomic<float> s_maxTravelDistance(150.0f);
-static std::atomic<float> s_guidelineThickness(0.45f);
-static std::atomic<int>   s_colorTheme(0);
-static std::atomic<bool>  s_showPrediction(true);
-static std::atomic<bool>  s_showPocket(true);
-static std::atomic<float> s_lineTransparency(1.0f);
-static std::atomic<bool>  s_keepLineAfterShot(true);
-static std::atomic<double> s_freezeBaselineX(0.0);
-static std::atomic<bool>  s_waitingForHandMove(false);
+static std::atomic<float> s_strikerRadius{2.65f};
+static std::atomic<float> s_puckRadius{1.95f};
+static std::atomic<float> s_pocketRadius{2.65f};
+std::atomic<float> s_pocketInset{33.48f};
+static std::atomic<bool>  s_hasUserPocketRadius{false};
+static std::atomic<float> s_maxTravelDistance{150.0f};
+static std::atomic<float> s_guidelineThickness{0.45f};
+static std::atomic<int>   s_colorTheme{0};
+static std::atomic<bool>  s_showPrediction{true};
+static std::atomic<bool>  s_showPocket{true};
+static std::atomic<float> s_lineTransparency{1.0f};
+static std::atomic<bool>  s_keepLineAfterShot{true};
+static std::atomic<double> s_freezeBaselineX{0.0};
+static std::atomic<bool>  s_waitingForHandMove{false};
 
-static std::atomic<uint32_t> s_customStrikerColor(0xFFFFFFFF);
-static std::atomic<uint32_t> s_customMyPuckColor(0xFF2699FF);
-static std::atomic<uint32_t> s_customOpponentPuckColor(0xFFFFD91A);
-static std::atomic<bool>     s_hasCustomColors(false);
+static std::atomic<uint32_t> s_customStrikerColor{0xFFFFFFFF};
+static std::atomic<uint32_t> s_customMyPuckColor{0xFF2699FF};
+static std::atomic<uint32_t> s_customOpponentPuckColor{0xFFFFD91A};
+static std::atomic<bool>     s_hasCustomColors{false};
 
 struct BodyColor {
     float r, g, b, a;
@@ -2778,11 +2778,14 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
         return false;
     }
 
-    // Count secondary intermediate puck collisions
+    // Count secondary intermediate puck collisions with non-trivial movement or hit speed
     int secondaryPuckHits = 0;
     for (const auto& traj : sim.puckTrajectories) {
-        if (traj.isHit && traj.puckIndex != sim.firstContactPuckId) {
-            secondaryPuckHits++;
+        if (traj.puckIndex != sim.firstContactPuckId) {
+            double dMoved = std::hypot(traj.finalX - traj.startX, traj.finalY - traj.startY);
+            if (traj.isHit && (traj.hitSpeed > 2.0 || dMoved > 0.35)) {
+                secondaryPuckHits++;
+            }
         }
     }
 
@@ -2832,18 +2835,19 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
         }
 
         int tier = 99;
-        if (traj.puckIndex == sim.firstContactPuckId && puckCushBounces == 0 && secondaryPuckHits == 0) {
-            // Tier 1: Direct Clean Pot (0 cushions, direct striker hit on target puck)
-            tier = 1;
-        } else if (traj.puckIndex == sim.firstContactPuckId && puckCushBounces == 1 && secondaryPuckHits == 0) {
-            // Tier 2: 1-Cushion Bank Pot (Striker directly hits puck -> puck hits 1 cushion -> pocket)
-            tier = 2;
-        } else if (traj.puckIndex != sim.firstContactPuckId && puckCushBounces == 0 && !firstPuckHadCushion && secondaryPuckHits == 1) {
-            // Tier 3: Direct Combination Pot (Striker -> Puck A -> Puck B -> Pocket, 0 cushions for all!)
+        if (traj.puckIndex == sim.firstContactPuckId && puckCushBounces == 0) {
+            // Direct Clean Pot (0 cushions, direct striker hit on target puck)
+            // If cluster pucks are disturbed: Tier 1 with cluster disturbance
+            tier = (secondaryPuckHits == 0) ? 1 : 2;
+        } else if (traj.puckIndex == sim.firstContactPuckId && (puckCushBounces == 1 || puckCushBounces == 2)) {
+            // Bank Pot (1 or 2 cushions)
+            tier = (secondaryPuckHits == 0) ? 2 : 3;
+        } else if (traj.puckIndex != sim.firstContactPuckId) {
+            // Combination / Cannon / Cluster Kiss Pot (Striker -> Puck A -> ... -> Target Puck -> Pocket)
             tier = 3;
         }
 
-        // Only Tiers 1, 2, and 3 are allowed! Any other shot (striker bounce, puck bounce into puck, multi-bounce combo) is REJECTED!
+        // Only Tiers 1, 2, and 3 are allowed!
         if (tier > 3) {
             continue;
         }
@@ -2863,8 +2867,8 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
 
         // Thin cut filter:
         if (tier == 1 && cutDeg > 75.0) continue;
-        if (tier == 2 && cutDeg > 55.0) continue;
-        if (tier == 3 && cutDeg > 45.0) continue;
+        if (tier == 2 && cutDeg > 65.0) continue;
+        if (tier == 3 && cutDeg > 60.0) continue;
 
         // Pocket Entry Quality
         double dToPocketCenter = std::hypot(traj.pocketCenterX - traj.finalX, traj.pocketCenterY - traj.finalY);
@@ -2872,13 +2876,17 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
         // Risk engine
         double risk = 0.0;
         if (tier == 1) risk += 5.0;
-        else if (tier == 2) risk += 30.0;
-        else if (tier == 3) risk += 45.0;
+        else if (tier == 2) risk += (secondaryPuckHits > 0) ? 25.0 : 20.0;
+        else if (tier == 3) risk += (secondaryPuckHits > 1) ? 42.0 : 35.0;
+
+        if (secondaryPuckHits > 0) {
+            risk += std::min(15.0, secondaryPuckHits * 3.5);
+        }
 
         if (cutDeg > 12.0 && cutDeg <= 40.0) {
             risk += (cutDeg - 12.0) * 0.40;
         } else if (cutDeg > 40.0) {
-            risk += 28.0 * 0.40 + (cutDeg - 40.0) * 0.90;
+            risk += 28.0 * 0.40 + (cutDeg - 40.0) * 0.85;
         }
 
         if (totalPathLength > 35.0) {
@@ -2890,7 +2898,10 @@ static bool evaluateCandidateShot(const AimSimulationResult& sim, float candX, f
         risk = std::clamp(risk, 1.0, 99.0);
 
         // Scoring: Massive bonus for straight shots so they dominate over any other shots
-        double baseScore = (tier == 1) ? 200000.0 : ((tier == 2) ? 60000.0 : 30000.0);
+        double baseScore = (tier == 1) ? 200000.0 : ((tier == 2) ? 80000.0 : 40000.0);
+        if (secondaryPuckHits > 0 && tier == 1) {
+            baseScore = 150000.0;
+        }
         double straightBonus = 0.0;
         if (tier == 1) {
             if (cutDeg < 12.0) {
@@ -3160,7 +3171,6 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
                         break;
                     }
                 }
-                if (strikerPathBlocked) continue;
 
                 double aimAngle = std::atan2(S_y - baselineY, S_x - testX);
                 s_scanLiveX.store(testX);
@@ -3175,7 +3185,7 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
                         foundShot = true;
                         goto execute_selected_shot;
                     }
-                    if (cand.tier == 1 && cand.cutAngleDeg < 25.0) {
+                    if (cand.tier == 1 && cand.cutAngleDeg < 25.0 && !strikerPathBlocked) {
                         bestShot = cand;
                         foundShot = true;
                         goto execute_selected_shot;
@@ -3221,9 +3231,9 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
     }
 
     // =========================================================================
-    // STEP 3: BASELINE SLIDE COARSE SEARCH (Fallback for remaining pockets)
+    // STEP 3: BASELINE SLIDE DENSE SEARCH (Fallback for remaining pockets and complex clusters)
     // =========================================================================
-    for (float candX = minX; candX <= maxX; candX += 4.0f) {
+    for (float candX = minX; candX <= maxX; candX += 2.0f) {
         if (isBaselineBlocked(candX)) continue;
         for (const auto& tgt : targets) {
             if (!isTargetAllowed(tgt.puckType)) continue;
@@ -3248,7 +3258,7 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
                 double dApp = std::hypot(ax, ay);
                 if (dApp < 1.0) continue;
                 double dotCut = (ax * nx + ay * ny) / dApp;
-                if (dotCut < 0.50) continue; // Cut angle > 60 degrees, skip
+                if (dotCut < 0.35) continue; // Cut angle > 70 degrees, skip
 
                 double aimAngle = std::atan2(ay, ax);
                 AimSimulationResult sim = simulateStrikerTrajectory(candX, baselineY, aimAngle, 1.0, 1200);

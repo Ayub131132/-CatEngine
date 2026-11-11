@@ -52,3 +52,8 @@ extracted_carrom/
 # Agent runtime state
 .agents/
 skills-lock.json
+
+# Local Clang / Compilation databases
+compile_commands.json
+*.png
+diagnostics/
