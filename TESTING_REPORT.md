@@ -14,7 +14,10 @@
 | **Physics Simulation** | `PhysicsEngineV2` (C++17) | 7 | 7 | 0 | **100% PASSED** |
 | **Computer Vision** | `BoardDetectionEngine` (C++17) | 3 | 3 | 0 | **100% PASSED** |
 | **Build & Toolchain** | Full APK Assembly | 66 Gradle Tasks | 66 | 0 | **100% PASSED** |
-| **16KB Page Alignment** | `libengine.so` ELF Program Headers | 2 ABIs | 2 | 0 | **100% COMPLIANT** |
+| **16KB Page Alignment** | `libengine.so` ELF Headers | 2 ABIs | 2 | 0 | **100% COMPLIANT** |
+| **Device Installation** | Vivo T3 Lite 5G (Android 15) | 1 | 1 | 0 | **SUCCESS** |
+| **Runtime & Native Hooks**| Live In-Process Hooks & Heartbeat | 8 Hooks | 8 | 0 | **100% ACTIVE** |
+| **GLES Shaders** | Live Overlay Shader Compilation | 2 Shaders | 2 | 0 | **INITIALIZED** |
 
 ---
 
@@ -119,9 +122,52 @@ Program Headers:
 
 ---
 
-## 5. Artifact Delivery
+## 5. Physical Device Live Testing & Handover (Vivo T3 Lite 5G, Android 15)
+
+* **Target Device:** Vivo T3 Lite 5G (`V2356` / `V2346iM1`)
+* **Device Serial:** `10ME8DF1CT0001Z`
+* **OS Version:** Android 15 (API 35, 16KB Kernel Compatible)
+* **Status:** Connected, authorized, actively running CatEngine foreground activity.
+
+### Live ADB Execution Sequence:
+1. **Device Verification:** `adb devices -l` confirmed `10ME8DF1CT0001Z` in `device` state.
+2. **Streamed Installation:**
+   ```bash
+   adb -s 10ME8DF1CT0001Z install -r -d "app\build\outputs\apk\debug\CatEngine_1.0.0_debug.apk"
+   # Output: Performing Streamed Install -> Success
+   ```
+3. **Permissions Granted:**
+   ```bash
+   adb -s 10ME8DF1CT0001Z shell appops set com.engine.cat SYSTEM_ALERT_WINDOW allow
+   ```
+4. **Activity Launch:**
+   ```bash
+   adb -s 10ME8DF1CT0001Z shell am start -n com.engine.cat/top.niunaijun.blackboxa.view.main.MainActivity
+   # Current Focus: Window{56ab76d u0 com.engine.cat/top.niunaijun.blackboxa.view.main.MainActivity type=1}
+   ```
+5. **Live Logcat Telemetry:**
+   ```
+   CatEngine: [CatEngine] [Heartbeat] PID=30546 | MatchActive=0 | AutoShot=0
+   CatEngine: [CatEngine] Verified true libgame base at 0x724862A000! Installing game lifecycle & tracking hooks...
+   CatEngine: [CatEngine] Hooked setupLocalStrikerBar (0x1A28F98) successfully! insn=0xA9BC7BFD
+   CatEngine: [CatEngine] Hooked setupOpponentStrikerBar (0x1A1DDF4) successfully! insn=0xA9BC7BFD
+   CatEngine: [CatEngine] Hooked startMatchEnding (0x19DF2A8) successfully! insn=0xD10183FF
+   CatEngine: [CatEngine] Hooked TableLogic::moveStrikerToPositionSmooth (0x1B2B748) successfully! insn=0x6DBD23E9
+   CatEngine: [CatEngine] Hooked forcePuckPosition:position: (0x1B3352C) successfully! insn=0x6DBE23E9
+   CatEngine: [CatEngine] Hooked ControlsLogicLocal onAimChanged (0x19843A0) successfully! insn=0xD10103FF
+   CatEngine: [CatEngine] Hooked ControlsLogicLocal onShotFired (0x1984568) successfully! insn=0xD10143FF
+   CatEngine: [CatEngine] [GraphicsEngine] GLES shaders initialized successfully! LineProg=9, CircleProg=12
+   CatEngine: [CatEngine] [Heartbeat] PID=30546 | MatchActive=0 | AutoShot=0
+   ```
+
+---
+
+## 6. Artifact Delivery
 
 * **Debug APK Location:** `app\build\outputs\apk\debug\CatEngine_1.0.0_debug.apk`
 * **File Size:** 22,484,774 bytes (22.48 MB)
 * **Package Name:** `com.engine.cat`
 * **Target Activity:** `top.niunaijun.blackboxa.view.main.MainActivity`
+* **Installed on Device:** Yes (`10ME8DF1CT0001Z`)
+* **Foreground State:** Active & In Focus
+

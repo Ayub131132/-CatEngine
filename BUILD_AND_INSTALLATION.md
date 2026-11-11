@@ -90,3 +90,4 @@ adb shell pm grant com.engine.cat android.permission.SYSTEM_ALERT_WINDOW
    ```powershell
    adb logcat -s CatEngine:I CatEngine-V2:I
    ```
+

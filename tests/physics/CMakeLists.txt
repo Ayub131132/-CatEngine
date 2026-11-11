@@ -18,3 +18,4 @@ if (MSVC)
 else()
     target_compile_options(test_physics_engine PRIVATE -Wall -Wextra)
 endif()
+

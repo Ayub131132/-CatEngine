@@ -27,3 +27,4 @@ All notable changes to the CatEngine project are documented in this file.
 - **Native Binary & Hook Verification:**
   - Extracted live game library `libgame-CARROM-GooglePlay-Gold-Release-Module-1491.so` (SHA-256: `4CF2BA474FC9AEFDA142FBDCA46CF7B4D3EBF06A2114ECD8487A3E48448710B4`).
   - Verified function prologues and float coordinate signatures for all CatEngine native hooks in `catEngine.cpp` using `llvm-objdump`.
+

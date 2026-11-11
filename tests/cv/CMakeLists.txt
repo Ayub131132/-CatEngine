@@ -18,3 +18,4 @@ if (MSVC)
 else()
     target_compile_options(test_board_detection PRIVATE -Wall -Wextra)
 endif()
+
