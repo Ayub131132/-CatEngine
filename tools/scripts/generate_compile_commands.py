@@ -21,6 +21,12 @@ for root, dirs, files in os.walk(bcore_cpp):
                 compiler,
                 "--target=aarch64-linux-android24",
                 f"--sysroot={sysroot}",
+                "-isystem",
+                f"{sysroot}/usr/include/c++/v1",
+                "-isystem",
+                f"{sysroot}/usr/include",
+                "-isystem",
+                f"{sysroot}/usr/include/aarch64-linux-android",
                 std_flag,
                 f"-I{bcore_cpp.replace('\\', '/')}",
                 "-DANDROID",
@@ -42,4 +48,3 @@ with open(out_path, "w", encoding="utf-8") as fp:
     json.dump(commands, fp, indent=2)
 
 print(f"Generated {out_path} with {len(commands)} entries.")
-

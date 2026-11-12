@@ -1,9 +1,14 @@
 --target=aarch64-linux-android24
 --sysroot=C:/AndroidSDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/sysroot
+-isystem
+C:/AndroidSDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/c++/v1
+-isystem
+C:/AndroidSDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include
+-isystem
+C:/AndroidSDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/include/aarch64-linux-android
 -std=c++20
 -IC:/Users/Tanmoy/OneDrive/Documents/-CatEngine/Bcore/src/main/cpp
 -DANDROID
 -D__ANDROID__
 -D__aarch64__
 -D__ANDROID_API__=24
-

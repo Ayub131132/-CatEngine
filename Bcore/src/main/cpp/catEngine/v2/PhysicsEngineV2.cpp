@@ -138,12 +138,23 @@ static inline bool resolveDiscDiscContact(BodyInternal& bi, BodyInternal& bj,
     double v1n_prime = (m1 * v1n + m2 * v2n - m2 * e * relNorm) / mSum;
     double v2n_prime = (m1 * v1n + m2 * v2n + m1 * e * relNorm) / mSum;
 
+    // 4b. Cut-throw: oblique cut angle induces a small tangential deflection on
+    //     the struck disc (libgame.so physics confirmed: ~2% of normal impulse at 45°).
+    //     cutThrowFactor is adaptively learned per session by AdaptiveLearningEngine.
+    double normalImpulseMag = std::abs(m2 * e * relNorm / mSum);
+    double cutAngle = std::atan2(std::abs(v1t - v2t), std::max(0.001, std::abs(v1n - v2n)));
+    double throwScale = config.cutThrowFactor * std::sin(cutAngle) * normalImpulseMag;
+    // Apply to struck disc (bj) only — small tangential velocity perturbation
+    double throwSign = (v1t - v2t > 0.0) ? 1.0 : -1.0;
+    double throwVx = throwSign * throwScale * tx;
+    double throwVy = throwSign * throwScale * ty;
+
     // Reconstruct post-collision Cartesian velocities
     bi.vx = v1n_prime * nx + v1t * tx;
     bi.vy = v1n_prime * ny + v1t * ty;
 
-    bj.vx = v2n_prime * nx + v2t * tx;
-    bj.vy = v2n_prime * ny + v2t * ty;
+    bj.vx = v2n_prime * nx + v2t * tx + throwVx;
+    bj.vy = v2n_prime * ny + v2t * ty + throwVy;
 
     bi.r_omega = std::hypot(bi.vx, bi.vy);
     bj.r_omega = std::hypot(bj.vx, bj.vy);

@@ -90,6 +90,7 @@ struct PhysicsConfig {
     // Striker mass: Authentic Carrom Pool libgame.so mass ratio is 3.00 : 1.00
     double strikerMass = 3.00;            // Authentic carrom striker mass ratio (3.00 : 1.00)
     double puckMass = 1.00;
+    double cutThrowFactor = 0.020;        // Oblique cut throw deflection factor (libgame.so 0x199885c)
     // NOTE: contactFriction and cushionTangentFriction removed — they were UNUSED in simulate().
     // Tangential friction is handled inline by the spin impulse solver: min(0.4*|vn|, |v_slip|/2.5)
 
