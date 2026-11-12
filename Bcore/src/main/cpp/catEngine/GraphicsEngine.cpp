@@ -408,6 +408,17 @@ static void buildNativeAffineTableMatrix(float *m, float screenWidth,
                                          float screenHeight, double a, double b,
                                          double c, double d, double tx,
                                          double ty) {
+  // If coordinates are in Cocos2d design resolution points (540.0 width), scale to screen pixels:
+  if (screenWidth > 540.0f && tx < screenWidth * 0.45f && tx > 50.0f) {
+    double factor = static_cast<double>(screenWidth) / 540.0;
+    a *= factor;
+    b *= factor;
+    c *= factor;
+    d *= factor;
+    tx *= factor;
+    ty *= factor;
+  }
+
   memset(m, 0, 16 * sizeof(float));
   m[0] = static_cast<float>((2.0 * a) / screenWidth);
   m[1] = static_cast<float>((2.0 * b) / screenHeight);
@@ -1726,6 +1737,9 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // Naturally centered on the screen (width * 0.5f, height * 0.5f)
     float boardCenterX = width * 0.5f;
     float boardCenterY = height * 0.5f;
+    if (height > width * 1.8f) {
+      boardCenterY = height * 0.5f - 9.5f;
+    }
     float boardScale = (width * 0.94144f) / (2.0f * kBoardHalfSize);
 
     float tableMVP[16];
@@ -1762,7 +1776,17 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
       double tx = s_nativeAffineTx.load();
       double ty = s_nativeAffineTy.load();
       double sc = std::hypot(a, b);
-      if (sc > 5.0 && std::abs(a) > 1e-4 && std::abs(d) > 1e-4) {
+      if (sc > 3.0 && std::abs(a) > 1e-4 && std::abs(d) > 1e-4) {
+        if (width > 540.0f && tx < width * 0.45f && tx > 50.0f) {
+          double factor = static_cast<double>(width) / 540.0;
+          a *= factor;
+          b *= factor;
+          c *= factor;
+          d *= factor;
+          tx *= factor;
+          ty *= factor;
+          sc *= factor;
+        }
         buildNativeAffineTableMatrix(tableMVP, static_cast<float>(width),
                                      static_cast<float>(height), a, b, c, d, tx, ty);
         boardScale = static_cast<float>(sc);
@@ -1777,6 +1801,12 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         float cx = s_autoCenterX.load();
         float cy = s_autoCenterY.load();
         float sc = s_autoScale.load();
+        if (width > 540.0f && cx < width * 0.45f && cx > 50.0f) {
+          float factor = static_cast<float>(width) / 540.0f;
+          cx *= factor;
+          cy *= factor;
+          sc *= factor;
+        }
         if (sc > 5.0f && cx >= width * 0.35f && cx <= width * 0.65f) {
           boardCenterX = cx;
           boardCenterY = cy;

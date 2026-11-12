@@ -282,6 +282,11 @@ static bool safeReadDouble(uintptr_t addr, double* outVal) {
     return safeReadBytes(addr, outVal, sizeof(double));
 }
 
+static bool safeReadByte(uintptr_t addr, uint8_t* outVal) {
+    if (!outVal) return false;
+    return safeReadBytes(addr, outVal, sizeof(uint8_t));
+}
+
 // Forward declaration
 uintptr_t resolveLibgameBase();
 
@@ -327,6 +332,7 @@ static inline bool isValidBaselineY(double y) {
 static std::atomic<double> g_lastLoggedAngle(M_PI / 2.0); // Default 90 deg (M_PI / 2.0)
 static std::atomic<double> g_lastLoggedForce(0.5);
 static MCPointDouble g_lastLoggedStriker = {999999.0, 999999.0};
+static std::atomic<int64_t> s_lastUserSliderTouchMs(0);
 
 // Dynamic sliding baseline X range in cm (strictly clamped within allowed bounds, defaults to +/-23.85 cm)
 static std::atomic<double> g_baselineMinX(-23.85);
@@ -1058,6 +1064,18 @@ bool CatEngine_GetTableTransform(double* outAffine6) {
     double sc = std::hypot(a, b);
     if (sc < 3.0 || sc > 150.0) return false;
 
+    // Convert from Cocos2d design resolution points (540 width) to physical OpenGL screen pixels
+    float vpW = static_cast<float>(s_viewportWidth.load());
+    if (vpW > 0.0f && (sc < 7.5 || tx < vpW * 0.45f)) {
+        double designToScreen = static_cast<double>(vpW) / 540.0;
+        a *= designToScreen;
+        b *= designToScreen;
+        c *= designToScreen;
+        d *= designToScreen;
+        tx *= designToScreen;
+        ty *= designToScreen;
+    }
+
     outAffine6[0] = a;
     outAffine6[1] = b;
     outAffine6[2] = c;
@@ -1409,6 +1427,10 @@ static void my_forceStrikerPosition(void* self, void* sel, int baselineId, doubl
         g_liveStrikerY.store(lockedY);
         onStrikerPositionUpdated(clampedX, lockedY);
 
+        int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        s_lastUserSliderTouchMs.store(nowMs);
+
         GraphicsEngine_OnStrikerReturnedToBaseline();
         GraphicsEngine_SetReviewFreeze(false);
 
@@ -1455,22 +1477,40 @@ static MCPointDouble sampleLiveStrikerOnTable() {
                 uint32_t key = 0;
                 if (safeReadInsn(curr + 0x20, &key)) {
                     uintptr_t slAddr = curr + 0x30;
-                    uintptr_t xBits = 0, yBits = 0;
-                    if (safeReadPtr(slAddr + 0x10, &xBits) && safeReadPtr(slAddr + 0x18, &yBits)) {
-                        double sx = *reinterpret_cast<double*>(&xBits);
-                        double sy = *reinterpret_cast<double*>(&yBits);
-                        if (!std::isnan(sx) && !std::isnan(sy) && std::abs(sx) <= 38.0 && std::abs(sy) <= 38.0) {
-                            bool isRotated = s_isLocalTurnRotated.load();
-                            int knownLocal = s_localBaselineId.load();
-                            bool isTarget = (knownLocal != 0) ? (static_cast<int>(key) == knownLocal)
-                                                              : (isRotated ? (sy > 15.0) : (sy < -15.0));
-                            if (isTarget) {
-                                localNode = curr;
-                                localSx = isRotated ? -sx : sx;
-                                localSy = -25.35;
-                                localKey = static_cast<int>(key);
-                                break;
+                    uint8_t isMoving = 0;
+                    double sx = 0.0, sy = 0.0;
+                    bool readPos = false;
+                    if (safeReadByte(slAddr + 0x170, &isMoving) && isMoving != 0) {
+                        uintptr_t mxBits = 0, myBits = 0;
+                        if (safeReadPtr(slAddr + 0x160, &mxBits) && safeReadPtr(slAddr + 0x168, &myBits)) {
+                            double msx = *reinterpret_cast<double*>(&mxBits);
+                            double msy = *reinterpret_cast<double*>(&myBits);
+                            if (!std::isnan(msx) && !std::isnan(msy) && std::abs(msx) <= 38.0 && std::abs(msy) <= 38.0) {
+                                sx = msx;
+                                sy = msy;
+                                readPos = true;
                             }
+                        }
+                    }
+                    if (!readPos) {
+                        uintptr_t xBits = 0, yBits = 0;
+                        if (safeReadPtr(slAddr + 0x10, &xBits) && safeReadPtr(slAddr + 0x18, &yBits)) {
+                            sx = *reinterpret_cast<double*>(&xBits);
+                            sy = *reinterpret_cast<double*>(&yBits);
+                            readPos = true;
+                        }
+                    }
+                    if (readPos && !std::isnan(sx) && !std::isnan(sy) && std::abs(sx) <= 38.0 && std::abs(sy) <= 38.0) {
+                        bool isRotated = s_isLocalTurnRotated.load();
+                        int knownLocal = s_localBaselineId.load();
+                        bool isTarget = (knownLocal != 0) ? (static_cast<int>(key) == knownLocal)
+                                                          : (isRotated ? (sy > 15.0) : (sy < -15.0));
+                        if (isTarget) {
+                            localNode = curr;
+                            localSx = isRotated ? -sx : sx;
+                            localSy = -25.35;
+                            localKey = static_cast<int>(key);
+                            break;
                         }
                     }
                 }
@@ -1552,12 +1592,17 @@ static MCPointDouble sampleStrikerFullTable() {
 }
 
 static MCPointDouble sampleStrikerPosition() {
+    int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    bool userRecentlyMoved = (nowMs - s_lastUserSliderTouchMs.load() < 2000);
+
     MCPointDouble live = sampleLiveStrikerOnTable();
     double minX = g_baselineMinX.load();
     double maxX = g_baselineMaxX.load();
     if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
 
-    double x = (!std::isnan(live.x) && std::abs(live.x) <= 35.0) ? live.x : g_liveStrikerX.load();
+    double x = userRecentlyMoved ? g_liveStrikerX.load()
+                                 : ((!std::isnan(live.x) && std::abs(live.x) <= 35.0) ? live.x : g_liveStrikerX.load());
     x = std::clamp(x, minX, maxX);
 
     // Local player striker is strictly locked to bottom baseline (-25.35 cm)
@@ -3073,6 +3118,10 @@ static void my_tl_moveStrikerSmooth(void* tableLogic, int baselineId, bool remot
         g_liveStrikerX.store(clampedX);
         g_liveStrikerY.store(lockedY);
         onStrikerPositionUpdated(clampedX, lockedY);
+
+        int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        s_lastUserSliderTouchMs.store(nowMs);
 
         double preservedAngle = g_lastLoggedAngle.load();
         if (std::abs(preservedAngle) > 100.0 || std::isnan(preservedAngle)) {
