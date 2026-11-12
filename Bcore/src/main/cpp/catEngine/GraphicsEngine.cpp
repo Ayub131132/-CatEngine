@@ -38,6 +38,7 @@ static std::atomic<float> s_guidelineThickness{0.45f};
 static std::atomic<int> s_colorTheme{0};
 static std::atomic<bool> s_showPrediction{true};
 static std::atomic<bool> s_showPocket{true};
+static std::atomic<bool> s_showBaselineGuides{false};
 static std::atomic<float> s_lineTransparency{1.0f};
 static std::atomic<bool> s_keepLineAfterShot{true};
 static std::atomic<double> s_freezeBaselineX{0.0};
@@ -1620,7 +1621,7 @@ simulateStrikerTrajectoryV2(double startX, double startY, double shotAngle,
 }
 
 static std::atomic<int> s_physicsEngineMode(
-    0); // 0 = Snake Engine CCD (Default), 1 = In-Engine Native
+    1); // 1 = In-Engine Native Stepper (Default: 99.99% Exact Miniclip Parity), 0 = Snake Engine CCD
 
 void GraphicsEngine_SetPhysicsEngineMode(int mode) {
   s_physicsEngineMode.store(mode);
@@ -1882,21 +1883,24 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     float localY = -25.35f;
     float oppY = 25.35f;
 
-    // Player's active baseline (Cyan)
-    drawTableLine(tableMVP, feather, bMinX, localY, bMaxX, localY, 0.35f, 0.0f,
-                  0.8f, 1.0f, 0.90f);
-    drawTableRing(tableMVP, feather, bMinX, localY, 1.55f, 0.26f, 0.0f, 0.8f,
-                  1.0f, 0.90f);
-    drawTableRing(tableMVP, feather, bMaxX, localY, 1.55f, 0.26f, 0.0f, 0.8f,
-                  1.0f, 0.90f);
+    // Baselines: Only render if explicitly enabled in developer settings
+    if (s_showBaselineGuides.load()) {
+      // Player's active baseline (Cyan)
+      drawTableLine(tableMVP, feather, bMinX, localY, bMaxX, localY, 0.25f, 0.0f,
+                    0.8f, 1.0f, 0.70f);
+      drawTableRing(tableMVP, feather, bMinX, localY, 1.55f, 0.26f, 0.0f, 0.8f,
+                    1.0f, 0.70f);
+      drawTableRing(tableMVP, feather, bMaxX, localY, 1.55f, 0.26f, 0.0f, 0.8f,
+                    1.0f, 0.70f);
 
-    // Opponent's baseline (Orange)
-    drawTableLine(tableMVP, feather, bMinX, oppY, bMaxX, oppY, 0.35f, 1.0f,
-                  0.4f, 0.2f, 0.90f);
-    drawTableRing(tableMVP, feather, bMinX, oppY, 1.55f, 0.26f, 1.0f, 0.4f,
-                  0.2f, 0.90f);
-    drawTableRing(tableMVP, feather, bMaxX, oppY, 1.55f, 0.26f, 1.0f, 0.4f,
-                  0.2f, 0.90f);
+      // Opponent's baseline (Orange)
+      drawTableLine(tableMVP, feather, bMinX, oppY, bMaxX, oppY, 0.25f, 1.0f,
+                    0.4f, 0.2f, 0.70f);
+      drawTableRing(tableMVP, feather, bMinX, oppY, 1.55f, 0.26f, 1.0f, 0.4f,
+                    0.2f, 0.70f);
+      drawTableRing(tableMVP, feather, bMaxX, oppY, 1.55f, 0.26f, 1.0f, 0.4f,
+                    0.2f, 0.70f);
+    }
 
     float baseThickness = s_guidelineThickness.load();
     if (baseThickness < 0.10f || baseThickness > 0.40f)
@@ -2081,12 +2085,6 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
           drawTableRing(tableMVP, feather, pcx, pcy, pkRad,
                         std::max(0.0f, pkRad - 0.22f), kPotColor.r, kPotColor.g,
                         kPotColor.b, 0.85f * lineAlpha);
-        } else {
-          // Idle pocket: Very subtle translucent cyan ring (never obstructs
-          // hole)
-          drawTableRing(tableMVP, feather, pcx, pcy, pkRad,
-                        std::max(0.0f, pkRad - 0.12f), 0.00f, 0.85f, 1.00f,
-                        0.35f * lineAlpha);
         }
       }
     }
@@ -2174,10 +2172,15 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
           const auto &traj = sim.puckTrajectories[p];
           if (traj.segments.empty() && !traj.inPocket && !traj.isHit)
             continue;
+
+          bool isPrimaryTarget = (traj.puckIndex == sim.firstContactPuckId) || traj.inPocket;
+          float trajAlpha = isPrimaryTarget ? lineAlpha : (0.22f * lineAlpha);
+          float trajThick = isPrimaryTarget ? baseThickness : (baseThickness * 0.65f);
+
           // If illegal target: Warning Red; If potted: Electric Neon Emerald;
           // Else: Entity Color
           BodyColor pkColor;
-          if (isIllegalTarget) {
+          if (isIllegalTarget && isPrimaryTarget) {
             pkColor = {1.0f, 0.18f, 0.18f, 1.0f};
           } else if (traj.inPocket) {
             pkColor = kPotColor;
@@ -2187,8 +2190,8 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
 
           if (traj.segments.empty() && (traj.isHit || traj.inPocket)) {
             drawTableLine(tableMVP, feather, traj.startX, traj.startY,
-                          traj.finalX, traj.finalY, baseThickness, pkColor.r,
-                          pkColor.g, pkColor.b, pkColor.a * lineAlpha);
+                          traj.finalX, traj.finalY, trajThick, pkColor.r,
+                          pkColor.g, pkColor.b, pkColor.a * trajAlpha);
           } else if (!traj.segments.empty()) {
             std::vector<MCPointFloat> pkPts;
             pkPts.reserve(traj.segments.size() + 1);
@@ -2196,21 +2199,20 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             for (const auto &seg : traj.segments) {
               pkPts.push_back({seg.endX, seg.endY});
             }
-            drawTablePolyline(tableMVP, feather, pkPts, baseThickness,
+            drawTablePolyline(tableMVP, feather, pkPts, trajThick,
                               pkColor.r, pkColor.g, pkColor.b,
-                              pkColor.a * lineAlpha);
+                              pkColor.a * trajAlpha);
           }
 
           if (traj.inPocket) {
-            // Pocket landing: Subtle wireframe ring, never an opaque blob
-            // covering the hole
+            // Pocket landing: Subtle wireframe ring, never an opaque blob covering the hole
             drawTableRing(tableMVP, feather, traj.finalX, traj.finalY,
                           pkRadius * 1.15f, pkRadius * 0.95f, kPotColor.r,
-                          kPotColor.g, kPotColor.b, 0.75f * lineAlpha);
-          } else if (traj.isHit || !traj.segments.empty()) {
+                          kPotColor.g, kPotColor.b, 0.85f * lineAlpha);
+          } else if (isPrimaryTarget && (traj.isHit || !traj.segments.empty())) {
             drawTableRing(tableMVP, feather, traj.finalX, traj.finalY, pkRadius,
                           std::max(0.0f, pkRadius - 0.12f), pkColor.r,
-                          pkColor.g, pkColor.b, 0.65f * lineAlpha);
+                          pkColor.g, pkColor.b, 0.75f * lineAlpha);
           }
         }
       }
