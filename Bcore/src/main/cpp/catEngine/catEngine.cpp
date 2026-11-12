@@ -1477,27 +1477,31 @@ static MCPointDouble sampleLiveStrikerOnTable() {
                 uint32_t key = 0;
                 if (safeReadInsn(curr + 0x20, &key)) {
                     uintptr_t slAddr = curr + 0x30;
-                    uint8_t isMoving = 0;
                     double sx = 0.0, sy = 0.0;
                     bool readPos = false;
-                    if (safeReadByte(slAddr + 0x170, &isMoving) && isMoving != 0) {
-                        uintptr_t mxBits = 0, myBits = 0;
-                        if (safeReadPtr(slAddr + 0x160, &mxBits) && safeReadPtr(slAddr + 0x168, &myBits)) {
-                            double msx = *reinterpret_cast<double*>(&mxBits);
-                            double msy = *reinterpret_cast<double*>(&myBits);
-                            if (!std::isnan(msx) && !std::isnan(msy) && std::abs(msx) <= 38.0 && std::abs(msy) <= 38.0) {
-                                sx = msx;
-                                sy = msy;
-                                readPos = true;
-                            }
+
+                    // 1. Read last smooth target position from StrikerLogic + 0x160 (persists continuously on baseline)
+                    uintptr_t mxBits = 0, myBits = 0;
+                    if (safeReadPtr(slAddr + 0x160, &mxBits) && safeReadPtr(slAddr + 0x168, &myBits)) {
+                        double msx = *reinterpret_cast<double*>(&mxBits);
+                        double msy = *reinterpret_cast<double*>(&myBits);
+                        if (!std::isnan(msx) && !std::isnan(msy) && std::abs(msx) <= 38.0 && std::abs(msy) <= 38.0) {
+                            sx = msx;
+                            sy = msy;
+                            readPos = true;
                         }
                     }
+                    // 2. Fall back to body position at slAddr + 0x10 only if 0x160 was unreadable
                     if (!readPos) {
                         uintptr_t xBits = 0, yBits = 0;
                         if (safeReadPtr(slAddr + 0x10, &xBits) && safeReadPtr(slAddr + 0x18, &yBits)) {
-                            sx = *reinterpret_cast<double*>(&xBits);
-                            sy = *reinterpret_cast<double*>(&yBits);
-                            readPos = true;
+                            double bx = *reinterpret_cast<double*>(&xBits);
+                            double by = *reinterpret_cast<double*>(&yBits);
+                            if (!std::isnan(bx) && !std::isnan(by) && std::abs(bx) <= 38.0 && std::abs(by) <= 38.0) {
+                                sx = bx;
+                                sy = by;
+                                readPos = true;
+                            }
                         }
                     }
                     if (readPos && !std::isnan(sx) && !std::isnan(sy) && std::abs(sx) <= 38.0 && std::abs(sy) <= 38.0) {
@@ -1592,17 +1596,18 @@ static MCPointDouble sampleStrikerFullTable() {
 }
 
 static MCPointDouble sampleStrikerPosition() {
-    int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    bool userRecentlyMoved = (nowMs - s_lastUserSliderTouchMs.load() < 2000);
-
-    MCPointDouble live = sampleLiveStrikerOnTable();
     double minX = g_baselineMinX.load();
     double maxX = g_baselineMaxX.load();
     if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
 
-    double x = userRecentlyMoved ? g_liveStrikerX.load()
-                                 : ((!std::isnan(live.x) && std::abs(live.x) <= 35.0) ? live.x : g_liveStrikerX.load());
+    double x = g_liveStrikerX.load();
+    MCPointDouble live = sampleLiveStrikerOnTable();
+    if (!std::isnan(live.x) && std::abs(live.x) <= 35.0) {
+        // If memory has a non-zero striker position, or if g_liveStrikerX has never been initialized:
+        if (std::abs(live.x) > 0.001 || std::abs(x) < 0.001) {
+            x = live.x;
+        }
+    }
     x = std::clamp(x, minX, maxX);
 
     // Local player striker is strictly locked to bottom baseline (-25.35 cm)
