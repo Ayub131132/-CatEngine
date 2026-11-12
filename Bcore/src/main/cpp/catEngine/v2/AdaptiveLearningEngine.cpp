@@ -136,7 +136,7 @@ void AdaptiveLearningEngine::fetchLivePhysicsConstants() {
     if (lc.fetched) {
         // Override baseline learned params with live-read values
         m_params.cushionRestitution = lc.restitutionCushion;
-        m_params.tableFriction      = lc.strikerFriction * 1.75f; // convert from raw friction to sim friction
+        m_params.tableFriction      = lc.puckFriction; // Authentic puck friction (0.1080f)
         m_params.emaFriction        = m_params.tableFriction;
         m_params.emaRestitution     = m_params.cushionRestitution;
 
@@ -216,7 +216,7 @@ void AdaptiveLearningEngine::tickSecondUpdate() {
             float avgDistErr = static_cast<float>(sumDistErr / nDist);
             m_params.tableFriction    -= avgDistErr * bufLR * 0.15f;
             m_params.forceScaleFactor -= avgDistErr * bufLR * 0.10f;
-            m_params.tableFriction    = std::clamp(m_params.tableFriction,    0.16f, 0.40f);
+            m_params.tableFriction    = std::clamp(m_params.tableFriction,    0.06f, 0.25f);
             m_params.forceScaleFactor = std::clamp(m_params.forceScaleFactor, 0.70f, 1.30f);
         }
         if (nReb > 0) {
@@ -294,7 +294,7 @@ void AdaptiveLearningEngine::trainOnShotSample(const ShotObservation& s) {
     if (predDist > 2.0 && actualDist > 2.0 && s.actualBounces == 0) {
         double distErrRatio = (actualDist - predDist) / predDist;
         m_params.tableFriction    -= static_cast<float>(distErrRatio * LEARNING_RATE * 0.15);
-        m_params.tableFriction     = std::clamp(m_params.tableFriction,    0.16f, 0.40f);
+        m_params.tableFriction     = std::clamp(m_params.tableFriction,    0.06f, 0.25f);
         m_params.forceScaleFactor -= static_cast<float>(distErrRatio * LEARNING_RATE * 0.10);
         m_params.forceScaleFactor  = std::clamp(m_params.forceScaleFactor, 0.70f, 1.30f);
     }
@@ -444,7 +444,7 @@ void AdaptiveLearningEngine::loadModel() {
         ifs.close();
 
         // Clamp all loaded values to safe ranges
-        m_params.tableFriction        = std::clamp(m_params.tableFriction,        0.16f, 0.40f);
+        m_params.tableFriction        = std::clamp(m_params.tableFriction,        0.06f, 0.25f);
         m_params.cushionRestitution   = std::clamp(m_params.cushionRestitution,   0.75f, 0.96f);
         m_params.forceScaleFactor     = std::clamp(m_params.forceScaleFactor,     0.70f, 1.30f);
         m_params.aimBiasCorrection    = std::clamp(m_params.aimBiasCorrection,   -0.05f, 0.05f);

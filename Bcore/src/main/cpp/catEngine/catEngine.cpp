@@ -1025,9 +1025,46 @@ void CatEngine_SetViewportDimensions(int w, int h) {
 }
 
 bool CatEngine_GetTableTransform(double* outAffine6) {
-    // Avoid calling native ptFromTableSpace which can trigger SIGSEGV during game view transitions.
-    // GraphicsEngine canonical projection is completely centered and stable across all devices.
-    return false;
+    if (!outAffine6 || !g_libgameBase) return false;
+    void* tc = g_activeTableController.load();
+    if (!tc || !isValidTableController(tc)) return false;
+
+    uintptr_t tcAddr = reinterpret_cast<uintptr_t>(tc);
+    uintptr_t visualsPtr = 0;
+    if (!safeReadPtr(tcAddr + g_offsets.tcTableVisuals, &visualsPtr) || !visualsPtr) return false;
+    uintptr_t visVtbl = 0;
+    if (!safeReadPtr(visualsPtr, &visVtbl) || !visVtbl) return false;
+
+    uintptr_t fnAddr = g_libgameBase + g_offsets.pointFromTableSpace;
+    uint32_t insn = 0;
+    if (!safeReadInsn(fnAddr, &insn)) return false;
+
+    auto pFn = reinterpret_cast<PointFromTableSpaceFn>(fnAddr);
+    MCPointD p0 = pFn(tc, nullptr, 0.0, 0.0);
+    MCPointD p1 = pFn(tc, nullptr, 10.0, 0.0);
+    MCPointD p2 = pFn(tc, nullptr, 0.0, 10.0);
+
+    if (std::isnan(p0.x) || std::isnan(p0.y) || std::isnan(p1.x) || std::isnan(p1.y) || std::isnan(p2.x) || std::isnan(p2.y)) {
+        return false;
+    }
+
+    double tx = p0.x;
+    double ty = p0.y;
+    double a = (p1.x - tx) / 10.0;
+    double b = (p1.y - ty) / 10.0;
+    double c = (p2.x - tx) / 10.0;
+    double d = (p2.y - ty) / 10.0;
+
+    double sc = std::hypot(a, b);
+    if (sc < 3.0 || sc > 150.0) return false;
+
+    outAffine6[0] = a;
+    outAffine6[1] = b;
+    outAffine6[2] = c;
+    outAffine6[3] = d;
+    outAffine6[4] = tx;
+    outAffine6[5] = ty;
+    return true;
 }
 
 // =========================================================================================

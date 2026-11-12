@@ -1495,8 +1495,8 @@ simulateStrikerTrajectoryV2(double startX, double startY, double shotAngle,
   auto liveConsts =
       catengine::ai::AdaptiveLearningEngine::getInstance().getLiveConstants();
   if (liveConsts.fetched && !s_userManualPhysics.load()) {
-    cfg.strikerFriction = liveConsts.strikerFriction * 1.48;
-    cfg.puckFriction = liveConsts.puckFriction;
+    cfg.strikerFriction = liveConsts.strikerFriction; // Authentic live striker friction (0.1600f)
+    cfg.puckFriction = liveConsts.puckFriction;       // Authentic live puck friction (0.1080f)
     cfg.restitutionBody = liveConsts.restitutionBody;
     cfg.restitutionCushion = liveConsts.restitutionCushion;
     cfg.strikerMass = liveConsts.strikerMass;
@@ -1513,8 +1513,10 @@ simulateStrikerTrajectoryV2(double startX, double startY, double shotAngle,
   cfg.cutThrowFactor = static_cast<double>(learnedAI.cutThrowFactor);
   if (learnedAI.totalShotsLearned > 0) {
     cfg.powerMultiplier *= learnedAI.forceScaleFactor;
-    cfg.strikerFriction =
-        learnedAI.tableFriction * 1.48; // Striker has higher friction ratio
+    double massFricRatio = (liveConsts.fetched && liveConsts.puckFriction > 0.01f)
+                               ? (static_cast<double>(liveConsts.strikerFriction) / liveConsts.puckFriction)
+                               : 1.4815;
+    cfg.strikerFriction = learnedAI.tableFriction * massFricRatio;
     cfg.puckFriction = learnedAI.tableFriction;
     cfg.restitutionCushion = learnedAI.cushionRestitution;
     if (learnedAI.pocketCaptureRadius > cfg.pocketRadius) {
@@ -1751,21 +1753,41 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         calibrated = true;
       }
     }
-    if (!calibrated && s_hasEngineCalibration.load()) {
-      float cx = s_autoCenterX.load();
-      float cy = s_autoCenterY.load();
-      float sc = s_autoScale.load();
-      if (sc > 5.0f && cx >= width * 0.35f && cx <= width * 0.65f) {
-        boardCenterX = cx;
-        boardCenterY = cy;
-        boardScale = sc;
+    bool usedNativeAffine = false;
+    if (s_hasNativeAffine.load()) {
+      double a = s_nativeAffineA.load();
+      double b = s_nativeAffineB.load();
+      double c = s_nativeAffineC.load();
+      double d = s_nativeAffineD.load();
+      double tx = s_nativeAffineTx.load();
+      double ty = s_nativeAffineTy.load();
+      double sc = std::hypot(a, b);
+      if (sc > 5.0 && std::abs(a) > 1e-4 && std::abs(d) > 1e-4) {
+        buildNativeAffineTableMatrix(tableMVP, static_cast<float>(width),
+                                     static_cast<float>(height), a, b, c, d, tx, ty);
+        boardScale = static_cast<float>(sc);
+        boardCenterX = static_cast<float>(tx);
+        boardCenterY = static_cast<float>(ty);
         calibrated = true;
+        usedNativeAffine = true;
       }
     }
-
-    buildUniversalTableMatrix(tableMVP, static_cast<float>(width),
-                              static_cast<float>(height), boardCenterX,
-                              boardCenterY, boardScale);
+    if (!usedNativeAffine) {
+      if (!calibrated && s_hasEngineCalibration.load()) {
+        float cx = s_autoCenterX.load();
+        float cy = s_autoCenterY.load();
+        float sc = s_autoScale.load();
+        if (sc > 5.0f && cx >= width * 0.35f && cx <= width * 0.65f) {
+          boardCenterX = cx;
+          boardCenterY = cy;
+          boardScale = sc;
+          calibrated = true;
+        }
+      }
+      buildUniversalTableMatrix(tableMVP, static_cast<float>(width),
+                                static_cast<float>(height), boardCenterX,
+                                boardCenterY, boardScale);
+    }
 
     float feather = (boardScale > 0.1f) ? (1.2f / boardScale) : 0.045f;
 

@@ -42,6 +42,8 @@ local.properties
 .DS_Store
 Thumbs.db
 ehthumbs.db
+bin/
+*/bin/
 
 # Analysis targets & split APKs (Keep off Git to avoid repository bloat)
 CarromPool_APK/

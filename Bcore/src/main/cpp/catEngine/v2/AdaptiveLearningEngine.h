@@ -55,7 +55,7 @@ struct ShotObservation {
 
 struct LearnedParameters {
     float cushionRestitution  = 0.88f;
-    float tableFriction       = 0.28f;
+    float tableFriction       = 0.108f;
     float cutThrowFactor      = 0.02f;
     float pocketCaptureRadius = 2.65f;
     float aimBiasCorrection   = 0.00f; // Angular bias in radians
@@ -64,7 +64,7 @@ struct LearnedParameters {
     int   totalShotsLearned   = 0;
     float confidenceScore     = 0.50f;
     // Per-second EMA smoothing state (not persisted):
-    float emaFriction         = 0.28f;
+    float emaFriction         = 0.108f;
     float emaRestitution      = 0.88f;
     float emaForceScale       = 1.00f;
 };
