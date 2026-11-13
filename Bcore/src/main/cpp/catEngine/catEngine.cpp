@@ -699,7 +699,7 @@ static void updateBaselineFromTableLogic(void* tc) {
     s_lastPlayerIndex.store(selected->key);
     g_baselineMinX.store(selected->minX);
     g_baselineMaxX.store(selected->maxX);
-    double lockedY = -25.35;
+    double lockedY = selected->y;
     g_fixedBaselineY.store(lockedY);
     g_liveStrikerY.store(lockedY);
     GraphicsEngine_SetBaselineRange(static_cast<float>(selected->minX), static_cast<float>(selected->maxX));
@@ -1407,21 +1407,19 @@ static void my_forceStrikerPosition(void* self, void* sel, int baselineId, doubl
     // Identify local vs opponent: baselineId set at setupLocalStrikerBar is the local player's key.
     int knownLocal = s_localBaselineId.load();
     bool isLocalPlayer = (knownLocal == 0 || baselineId == knownLocal);
-    if (isLocalPlayer && !std::isnan(x)) {
+    if (isLocalPlayer && !std::isnan(x) && !std::isnan(y)) {
         s_localBaselineId.store(baselineId);
         s_lastPlayerIndex.store(baselineId);
         g_matchActive.store(true);
         setGraphicsMatchActive(true);
 
-        double lockedY = -25.35;
+        double lockedY = y;
         g_fixedBaselineY.store(lockedY);
         double minX = g_baselineMinX.load();
         double maxX = g_baselineMaxX.load();
         if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
         
-        // Handle coordinate parity: when camera is rotated 180 degrees, table +X is screen left (-X)
-        double adjustedX = isRotated ? -x : x;
-        double clampedX = std::clamp(adjustedX, minX, maxX);
+        double clampedX = std::clamp(x, minX, maxX);
 
         g_liveStrikerX.store(clampedX);
         g_liveStrikerY.store(lockedY);
@@ -1505,14 +1503,13 @@ static MCPointDouble sampleLiveStrikerOnTable() {
                         }
                     }
                     if (readPos && !std::isnan(sx) && !std::isnan(sy) && std::abs(sx) <= 38.0 && std::abs(sy) <= 38.0) {
-                        bool isRotated = s_isLocalTurnRotated.load();
                         int knownLocal = s_localBaselineId.load();
                         bool isTarget = (knownLocal != 0) ? (static_cast<int>(key) == knownLocal)
-                                                          : (isRotated ? (sy > 15.0) : (sy < -15.0));
+                                                          : (std::abs(sy) > 15.0);
                         if (isTarget) {
                             localNode = curr;
-                            localSx = isRotated ? -sx : sx;
-                            localSy = -25.35;
+                            localSx = sx;
+                            localSy = sy;
                             localKey = static_cast<int>(key);
                             break;
                         }
@@ -1601,6 +1598,7 @@ static MCPointDouble sampleStrikerPosition() {
     if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
 
     double x = g_liveStrikerX.load();
+    double y = g_liveStrikerY.load();
     MCPointDouble live = sampleLiveStrikerOnTable();
     if (!std::isnan(live.x) && std::abs(live.x) <= 35.0) {
         // If memory has a non-zero striker position, or if g_liveStrikerX has never been initialized:
@@ -1608,12 +1606,12 @@ static MCPointDouble sampleStrikerPosition() {
             x = live.x;
         }
     }
+    if (!std::isnan(live.y) && std::abs(live.y) > 15.0 && std::abs(live.y) <= 35.0) {
+        y = live.y;
+    }
     x = std::clamp(x, minX, maxX);
 
-    // Local player striker is strictly locked to bottom baseline (-25.35 cm)
-    double y = -25.35;
     g_fixedBaselineY.store(y);
-
     g_liveStrikerX.store(x);
     g_liveStrikerY.store(y);
     return { x, y };
@@ -3108,17 +3106,14 @@ static void my_tl_moveStrikerSmooth(void* tableLogic, int baselineId, bool remot
         GraphicsEngine_OnStrikerReturnedToBaseline();
         GraphicsEngine_SetReviewFreeze(false);
 
-        double lockedY = -25.35;
+        double lockedY = y;
         g_fixedBaselineY.store(lockedY);
 
         double minX = g_baselineMinX.load();
         double maxX = g_baselineMaxX.load();
         if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
 
-        // When match/baseline is rotated 180 degrees, table coordinates are inverted with respect to user's screen slider
-        bool isRotated = s_isLocalTurnRotated.load();
-        double adjustedX = isRotated ? -x : x;
-        double clampedX = std::clamp(adjustedX, minX, maxX);
+        double clampedX = std::clamp(x, minX, maxX);
 
         g_liveStrikerX.store(clampedX);
         g_liveStrikerY.store(lockedY);
@@ -3130,7 +3125,7 @@ static void my_tl_moveStrikerSmooth(void* tableLogic, int baselineId, bool remot
 
         double preservedAngle = g_lastLoggedAngle.load();
         if (std::abs(preservedAngle) > 100.0 || std::isnan(preservedAngle)) {
-            preservedAngle = M_PI / 2.0;
+            preservedAngle = (lockedY > 0.0) ? (-M_PI / 2.0) : (M_PI / 2.0);
         }
         double preservedForce = g_lastLoggedForce.load();
         if (preservedForce < 0.05 || std::isnan(preservedForce)) preservedForce = 1.0;
@@ -3147,8 +3142,8 @@ extern "C" bool CatEngine_MoveStriker(double baselineX, double baselineY) {
     if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
     double clampedX = std::clamp(baselineX, minX, maxX);
 
-    double lockedY = -25.35;
-    g_fixedBaselineY.store(lockedY);
+    double lockedY = g_fixedBaselineY.load();
+    if (std::abs(lockedY) < 15.0) lockedY = -25.35;
 
     g_liveStrikerX.store(clampedX);
     g_liveStrikerY.store(lockedY);
@@ -3158,17 +3153,14 @@ extern "C" bool CatEngine_MoveStriker(double baselineX, double baselineY) {
     if (activeTc && isTableControllerAlive()) {
         int bId = s_localBaselineId.load();
         if (bId < 0) bId = 0;
-        bool isRotated = s_isLocalTurnRotated.load();
-        double targetGameX = isRotated ? -clampedX : clampedX;
-        double targetGameY = isRotated ? 25.35 : lockedY;
         uintptr_t tableLogicAddr = 0;
         if (safeReadPtr(reinterpret_cast<uintptr_t>(activeTc) + 0x3f0, &tableLogicAddr) && tableLogicAddr) {
             if (orig_tl_moveStrikerSmooth) {
-                orig_tl_moveStrikerSmooth(reinterpret_cast<void*>(tableLogicAddr), bId, false, targetGameX, targetGameY);
+                orig_tl_moveStrikerSmooth(reinterpret_cast<void*>(tableLogicAddr), bId, false, clampedX, lockedY);
             }
         }
         if (orig_forceStrikerPosition) {
-            orig_forceStrikerPosition(activeTc, nullptr, bId, targetGameX, targetGameY);
+            orig_forceStrikerPosition(activeTc, nullptr, bId, clampedX, lockedY);
         }
     }
 
@@ -3250,14 +3242,16 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
         }
     }
 
-    // Ensure local baseline is strictly bottom baseline (-25.35 cm)
-    double lockedY = -25.35;
-    g_fixedBaselineY.store(lockedY);
+    // Ensure local baseline matches discovered baseline Y
+    double lockedY = g_fixedBaselineY.load();
+    if (std::abs(lockedY) < 15.0) lockedY = -25.35;
     g_liveStrikerY.store(lockedY);
 
     MCPointDouble stPos = sampleStrikerPosition();
     double startX = (!std::isnan(stPos.x)) ? stPos.x : 0.0;
+    if (!std::isnan(stPos.y) && std::abs(stPos.y) > 15.0) lockedY = stPos.y;
     g_liveStrikerX.store(startX);
+    g_liveStrikerY.store(lockedY);
     onStrikerPositionUpdated(startX, lockedY);
 
     // Turn is guaranteed to be local player's turn when setupLocalStrikerBar is invoked!
@@ -3267,7 +3261,7 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
     s_isLocalTurnReady.store(true);
     s_lastShotTimeMs.store(0);
     GraphicsEngine_OnStrikerReturnedToBaseline();
-    double defaultAngle = M_PI / 2.0;
+    double defaultAngle = (lockedY > 0.0) ? (-M_PI / 2.0) : (M_PI / 2.0);
     GraphicsEngine_UpdateAim(startX, lockedY, defaultAngle, 1.0, false);
     if (self) {
         updateStrikerPhysicsFromGame(self);

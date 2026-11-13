@@ -1879,9 +1879,8 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     float bMinX = s_baselineMinX.load();
     float bMaxX = s_baselineMaxX.load();
 
-    curY = -25.35;
-    float localY = -25.35f;
-    float oppY = 25.35f;
+    float localY = (curY > 0.0) ? 25.35f : -25.35f;
+    float oppY = -localY;
 
     // Baselines: Only render if explicitly enabled in developer settings
     if (s_showBaselineGuides.load()) {
