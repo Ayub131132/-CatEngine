@@ -159,6 +159,10 @@ void GraphicsEngine_LoadAutoCorrectedPhysics();
 void GraphicsEngine_SetGuidelineThickness(float thickness);
 void GraphicsEngine_SetColorTheme(int theme);
 
+// 2-Player / Pass & Play turn display control
+void GraphicsEngine_SetPassAndPlayBothSides(bool enable);
+bool GraphicsEngine_GetPassAndPlayBothSides();
+
 // Dynamic Cat Engine UI controls
 void GraphicsEngine_SetShowPrediction(bool enable);
 bool GraphicsEngine_GetShowPrediction();

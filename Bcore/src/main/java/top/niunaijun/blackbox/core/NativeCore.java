@@ -132,6 +132,10 @@ public class NativeCore {
 
     public static native boolean isLocalTurnReady();
 
+    public static native void setPassAndPlayBothSides(boolean enable);
+
+    public static native boolean getPassAndPlayBothSides();
+
     public static native void applyEngineOffsets(String jsonOffsets);
 
 

@@ -335,6 +335,17 @@ jint getMatchPlayerCount(JNIEnv *env, jclass clazz) {
     return (jint) CatEngine_GetMatchPlayerCount();
 }
 
+extern "C" void CatEngine_SetPassAndPlayBothSides(bool enable);
+extern "C" bool CatEngine_GetPassAndPlayBothSides();
+
+void setPassAndPlayBothSides(JNIEnv *env, jclass clazz, jboolean enable) {
+    CatEngine_SetPassAndPlayBothSides((bool) enable);
+}
+
+jboolean getPassAndPlayBothSides(JNIEnv *env, jclass clazz) {
+    return (jboolean) CatEngine_GetPassAndPlayBothSides();
+}
+
 jboolean isLocalTurnReady(JNIEnv *env, jclass clazz) {
     return (jboolean) CatEngine_IsLocalTurnReady();
 }
@@ -399,6 +410,8 @@ static JNINativeMethod gMethods[] = {
         {"getAutoDetectedColor", "()I",                            (void *) getAutoDetectedColor},
         {"getMatchPlayerCount",  "()I",                            (void *) getMatchPlayerCount},
         {"isLocalTurnReady",     "()Z",                            (void *) isLocalTurnReady},
+        {"setPassAndPlayBothSides", "(Z)V",                         (void *) setPassAndPlayBothSides},
+        {"getPassAndPlayBothSides", "()Z",                          (void *) getPassAndPlayBothSides},
         {"applyEngineOffsets", "(Ljava/lang/String;)V",           (void *) applyEngineOffsets},
 };
 

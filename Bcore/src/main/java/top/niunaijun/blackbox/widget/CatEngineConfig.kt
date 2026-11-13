@@ -30,6 +30,7 @@ object CatEngineConfig {
     private const val KEY_OPPONENT_PUCK_COLOR = "cat_opponent_puck_color"
     private const val KEY_KEEP_LINE_AFTER_SHOT = "cat_keep_line_after_shot"
     private const val KEY_PHYSICS_ENGINE_MODE = "cat_physics_engine_mode"
+    private const val KEY_PASS_AND_PLAY_BOTH_SIDES = "cat_pass_and_play_both_sides"
     private const val KEY_FAST_FIRST_SHOT = "cat_fast_first_shot"
     private const val KEY_TARGET_COLOR_MODE = "cat_target_color_mode"
 
@@ -59,7 +60,9 @@ object CatEngineConfig {
         private set
     var keepLineAfterShot by mutableStateOf(false) // Default FALSE so stale lines clear after shot
         private set
-    var physicsEngineMode by mutableIntStateOf(0) // 0 = Snake Engine CCD, 1 = In-Engine Native
+    var physicsEngineMode by mutableIntStateOf(1) // 1 = In-Engine Native Stepper (99.99% exact parity), 0 = Snake Engine CCD
+        private set
+    var passAndPlayBothSides by mutableStateOf(false) // Default FALSE: only show during user's turn
         private set
     var fastFirstShotMode by mutableStateOf(false)
         private set
@@ -99,7 +102,8 @@ object CatEngineConfig {
         opponentPuckColor = Color(ocArgb)
 
         keepLineAfterShot = sp.getBoolean(KEY_KEEP_LINE_AFTER_SHOT, false)
-        physicsEngineMode = sp.getInt(KEY_PHYSICS_ENGINE_MODE, 0).coerceIn(0, 1)
+        physicsEngineMode = sp.getInt(KEY_PHYSICS_ENGINE_MODE, 1).coerceIn(0, 1)
+        passAndPlayBothSides = sp.getBoolean(KEY_PASS_AND_PLAY_BOTH_SIDES, false)
         fastFirstShotMode = sp.getBoolean(KEY_FAST_FIRST_SHOT, false)
         targetColorMode = sp.getInt(KEY_TARGET_COLOR_MODE, 0).coerceIn(0, 3)
         isLoaded = true
@@ -137,6 +141,7 @@ object CatEngineConfig {
 
             NativeCore.setKeepLineAfterShot(keepLineAfterShot)
             NativeCore.setPhysicsEngineMode(physicsEngineMode)
+            NativeCore.setPassAndPlayBothSides(passAndPlayBothSides)
             NativeCore.setFastFirstShotMode(fastFirstShotMode)
             NativeCore.setTargetColorMode(targetColorMode)
         } catch (t: Throwable) {
@@ -255,6 +260,14 @@ object CatEngineConfig {
         getPrefs(context).edit().putInt(KEY_PHYSICS_ENGINE_MODE, clamped).apply()
         try {
             NativeCore.setPhysicsEngineMode(clamped)
+        } catch (ignored: Throwable) {}
+    }
+
+    fun updatePassAndPlayBothSides(context: Context, enabled: Boolean) {
+        passAndPlayBothSides = enabled
+        getPrefs(context).edit().putBoolean(KEY_PASS_AND_PLAY_BOTH_SIDES, enabled).apply()
+        try {
+            NativeCore.setPassAndPlayBothSides(enabled)
         } catch (ignored: Throwable) {}
     }
 

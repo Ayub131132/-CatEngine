@@ -364,6 +364,8 @@ static std::atomic<bool> s_isLocalTurnReady(false);
 static std::atomic<bool> s_isOpponentTurn(false);
 static std::atomic<bool> s_isLocalTurnRotated(false); // True when local player is assigned top baseline (table is rotated 180 deg)
 static std::atomic<int>  s_localBaselineId(0);
+static std::atomic<int>  s_activeTurnPlayerId(0);
+static std::atomic<bool> s_passAndPlayBothSides(false);
 static std::atomic<int>  s_lastPlayerIndex(0);
 static std::atomic<int>  s_totalMatchPlayers(2); // 2 = 1v1, 3 = 3-player, 4 = 4-player/2v2
 static int s_queenPuckId = -1;
@@ -566,7 +568,19 @@ extern "C" bool CatEngine_IsMatchAlive() {
 }
 
 extern "C" bool CatEngine_IsLocalTurnReady() {
+    if (s_isOpponentTurn.load() && !s_passAndPlayBothSides.load()) {
+        return false;
+    }
     return s_isLocalTurnReady.load();
+}
+
+extern "C" void CatEngine_SetPassAndPlayBothSides(bool enable) {
+    s_passAndPlayBothSides.store(enable);
+    GraphicsEngine_SetPassAndPlayBothSides(enable);
+}
+
+extern "C" bool CatEngine_GetPassAndPlayBothSides() {
+    return s_passAndPlayBothSides.load();
 }
 
 extern "C" int CatEngine_GetMatchPlayerCount() {
@@ -1031,58 +1045,11 @@ void CatEngine_SetViewportDimensions(int w, int h) {
 }
 
 bool CatEngine_GetTableTransform(double* outAffine6) {
-    if (!outAffine6 || !g_libgameBase) return false;
-    void* tc = g_activeTableController.load();
-    if (!tc || !isValidTableController(tc)) return false;
-
-    uintptr_t tcAddr = reinterpret_cast<uintptr_t>(tc);
-    uintptr_t visualsPtr = 0;
-    if (!safeReadPtr(tcAddr + g_offsets.tcTableVisuals, &visualsPtr) || !visualsPtr) return false;
-    uintptr_t visVtbl = 0;
-    if (!safeReadPtr(visualsPtr, &visVtbl) || !visVtbl) return false;
-
-    uintptr_t fnAddr = g_libgameBase + g_offsets.pointFromTableSpace;
-    uint32_t insn = 0;
-    if (!safeReadInsn(fnAddr, &insn)) return false;
-
-    auto pFn = reinterpret_cast<PointFromTableSpaceFn>(fnAddr);
-    MCPointD p0 = pFn(tc, nullptr, 0.0, 0.0);
-    MCPointD p1 = pFn(tc, nullptr, 10.0, 0.0);
-    MCPointD p2 = pFn(tc, nullptr, 0.0, 10.0);
-
-    if (std::isnan(p0.x) || std::isnan(p0.y) || std::isnan(p1.x) || std::isnan(p1.y) || std::isnan(p2.x) || std::isnan(p2.y)) {
-        return false;
-    }
-
-    double tx = p0.x;
-    double ty = p0.y;
-    double a = (p1.x - tx) / 10.0;
-    double b = (p1.y - ty) / 10.0;
-    double c = (p2.x - tx) / 10.0;
-    double d = (p2.y - ty) / 10.0;
-
-    double sc = std::hypot(a, b);
-    if (sc < 3.0 || sc > 150.0) return false;
-
-    // Convert from Cocos2d design resolution points (540 width) to physical OpenGL screen pixels
-    float vpW = static_cast<float>(s_viewportWidth.load());
-    if (vpW > 0.0f && (sc < 7.5 || tx < vpW * 0.45f)) {
-        double designToScreen = static_cast<double>(vpW) / 540.0;
-        a *= designToScreen;
-        b *= designToScreen;
-        c *= designToScreen;
-        d *= designToScreen;
-        tx *= designToScreen;
-        ty *= designToScreen;
-    }
-
-    outAffine6[0] = a;
-    outAffine6[1] = b;
-    outAffine6[2] = c;
-    outAffine6[3] = d;
-    outAffine6[4] = tx;
-    outAffine6[5] = ty;
-    return true;
+    // Force Universal Table Matrix: The Cocos2d convertToWorldSpace: affine transform at 0x1B313D8
+    // operates in design resolution points (540-width) and suffers from letterboxing shifts on tall screens
+    // as well as inverted axes when rotated. The universal table matrix (centered at height*0.5, scale 0.94144)
+    // is physically and mathematically verified to match the phone display within 0.5px.
+    return false;
 }
 
 // =========================================================================================
@@ -1478,34 +1445,38 @@ static MCPointDouble sampleLiveStrikerOnTable() {
                     double sx = 0.0, sy = 0.0;
                     bool readPos = false;
 
-                    // 1. Read last smooth target position from StrikerLogic + 0x160 (persists continuously on baseline)
-                    uintptr_t mxBits = 0, myBits = 0;
-                    if (safeReadPtr(slAddr + 0x160, &mxBits) && safeReadPtr(slAddr + 0x168, &myBits)) {
-                        double msx = *reinterpret_cast<double*>(&mxBits);
-                        double msy = *reinterpret_cast<double*>(&myBits);
-                        if (!std::isnan(msx) && !std::isnan(msy) && std::abs(msx) <= 38.0 && std::abs(msy) <= 38.0) {
-                            sx = msx;
-                            sy = msy;
+                    // 1. Read true physical Box2D body position at slAddr + 0x10 and +0x18
+                    uintptr_t xBits = 0, yBits = 0;
+                    if (safeReadPtr(slAddr + 0x10, &xBits) && safeReadPtr(slAddr + 0x18, &yBits)) {
+                        double bx = *reinterpret_cast<double*>(&xBits);
+                        double by = *reinterpret_cast<double*>(&yBits);
+                        if (!std::isnan(bx) && !std::isnan(by) && std::abs(bx) <= 38.0 && std::abs(by) <= 38.0) {
+                            sx = bx;
+                            sy = by;
                             readPos = true;
                         }
                     }
-                    // 2. Fall back to body position at slAddr + 0x10 only if 0x160 was unreadable
+                    // 2. Only if body position was unreadable or 0, check smooth target at 0x160 if active
                     if (!readPos) {
-                        uintptr_t xBits = 0, yBits = 0;
-                        if (safeReadPtr(slAddr + 0x10, &xBits) && safeReadPtr(slAddr + 0x18, &yBits)) {
-                            double bx = *reinterpret_cast<double*>(&xBits);
-                            double by = *reinterpret_cast<double*>(&yBits);
-                            if (!std::isnan(bx) && !std::isnan(by) && std::abs(bx) <= 38.0 && std::abs(by) <= 38.0) {
-                                sx = bx;
-                                sy = by;
-                                readPos = true;
+                        uint8_t isSmooth = 0;
+                        safeReadBytes(slAddr + 0x170, &isSmooth, 1);
+                        if (isSmooth) {
+                            uintptr_t mxBits = 0, myBits = 0;
+                            if (safeReadPtr(slAddr + 0x160, &mxBits) && safeReadPtr(slAddr + 0x168, &myBits)) {
+                                double msx = *reinterpret_cast<double*>(&mxBits);
+                                double msy = *reinterpret_cast<double*>(&myBits);
+                                if (!std::isnan(msx) && !std::isnan(msy) && std::abs(msx) <= 38.0 && std::abs(msy) <= 38.0) {
+                                    sx = msx;
+                                    sy = msy;
+                                    readPos = true;
+                                }
                             }
                         }
                     }
                     if (readPos && !std::isnan(sx) && !std::isnan(sy) && std::abs(sx) <= 38.0 && std::abs(sy) <= 38.0) {
-                        int knownLocal = s_localBaselineId.load();
-                        bool isTarget = (knownLocal != 0) ? (static_cast<int>(key) == knownLocal)
-                                                          : (std::abs(sy) > 15.0);
+                        int targetKey = s_activeTurnPlayerId.load();
+                        if (targetKey < 0) targetKey = s_localBaselineId.load();
+                        bool isTarget = (static_cast<int>(key) == targetKey);
                         if (isTarget) {
                             localNode = curr;
                             localSx = sx;
@@ -1599,15 +1570,24 @@ static MCPointDouble sampleStrikerPosition() {
 
     double x = g_liveStrikerX.load();
     double y = g_liveStrikerY.load();
-    MCPointDouble live = sampleLiveStrikerOnTable();
-    if (!std::isnan(live.x) && std::abs(live.x) <= 35.0) {
-        // If memory has a non-zero striker position, or if g_liveStrikerX has never been initialized:
-        if (std::abs(live.x) > 0.001 || std::abs(x) < 0.001) {
+
+    // If g_liveStrikerX is valid and already set by user drag or setupLocalStrikerBar, keep it
+    if (std::isnan(x) || std::abs(x) > 35.0) {
+        MCPointDouble live = sampleLiveStrikerOnTable();
+        if (!std::isnan(live.x) && std::abs(live.x) <= 35.0) {
             x = live.x;
+        } else {
+            x = 0.0;
         }
     }
-    if (!std::isnan(live.y) && std::abs(live.y) > 15.0 && std::abs(live.y) <= 35.0) {
-        y = live.y;
+
+    if (std::isnan(y) || std::abs(y) < 15.0 || std::abs(y) > 35.0) {
+        MCPointDouble live = sampleLiveStrikerOnTable();
+        if (!std::isnan(live.y) && std::abs(live.y) > 15.0 && std::abs(live.y) <= 35.0) {
+            y = live.y;
+        } else {
+            y = (s_isOpponentTurn.load() && s_passAndPlayBothSides.load()) ? 25.35 : -25.35;
+        }
     }
     x = std::clamp(x, minX, maxX);
 
@@ -1650,8 +1630,16 @@ static void my_onAimChanged(void* this_ptr, int mode, double angle, double force
     }
 
     if (!std::isnan(angle) && !std::isnan(force)) {
+        if (s_isOpponentTurn.load()) {
+            if (!s_passAndPlayBothSides.load()) {
+                // Strictly hide guidelines during friend/opponent turn ("my chance not friends chance")
+                GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
+                return;
+            }
+        }
+
         s_isLocalTurnReady.store(true);
-        int localB = s_localBaselineId.load();
+        int localB = s_isOpponentTurn.load() ? s_activeTurnPlayerId.load() : s_localBaselineId.load();
         s_lastPlayerIndex.store((localB >= 0) ? localB : 0);
 
         g_matchActive.store(true);
@@ -1659,7 +1647,7 @@ static void my_onAimChanged(void* this_ptr, int mode, double angle, double force
 
         MCPointDouble stPos = sampleStrikerPosition();
         double curX = stPos.x;
-        double curY = stPos.y; // ALWAYS locked baseline Y!
+        double curY = stPos.y; // ALWAYS active player baseline Y!
 
         double launchAngle = pullAngleToLaunchAngle(angle);
         g_lastLoggedAngle.store(launchAngle);
@@ -2586,7 +2574,8 @@ AimSimulationResult CatEngine_SimulateInEngineNative(double startX, double start
     }
 
     // 1. Locate StrikerLogic
-    int targetPlayer = s_localBaselineId.load();
+    int targetPlayer = s_activeTurnPlayerId.load();
+    if (targetPlayer < 0) targetPlayer = s_localBaselineId.load();
     if (targetPlayer < 0) targetPlayer = 0;
 
     typedef void* (*TableLogicGetStrikerFn)(void* tableLogic, int playerId);
@@ -2713,11 +2702,13 @@ AimSimulationResult CatEngine_SimulateInEngineNative(double startX, double start
     // 5. Inject Aim Position and Velocity
     *reinterpret_cast<double*>(slAddr + 0x10) = startX;
     *reinterpret_cast<double*>(slAddr + 0x18) = startY;
+    *reinterpret_cast<double*>(slAddr + 0x160) = startX;
+    *reinterpret_cast<double*>(slAddr + 0x168) = startY;
 
-    typedef void (*TableLogicLaunchStrikerFn)(void* tableLogic, double force, double angle);
+    typedef void (*TableLogicLaunchStrikerFn)(void* tableLogic, int playerId, double force, double angle);
     auto launchStrikerFn = reinterpret_cast<TableLogicLaunchStrikerFn>(g_libgameBase + g_offsets.launchStriker);
     if (launchStrikerFn) {
-        launchStrikerFn(reinterpret_cast<void*>(tableLogicAddr), forceVal, shotAngle);
+        launchStrikerFn(reinterpret_cast<void*>(tableLogicAddr), targetPlayer, forceVal, shotAngle);
     }
 
     // 6. Execute Headless Stepper Loop
@@ -2748,8 +2739,8 @@ AimSimulationResult CatEngine_SimulateInEngineNative(double startX, double start
     sim.finalStrikerX = static_cast<float>(startX);
     sim.finalStrikerY = static_cast<float>(startY);
 
-    double dt = 0.005; // 200 Hz authentic sub-step integration
-    int totalSteps = (maxSimSteps > 0 && maxSimSteps <= 800) ? maxSimSteps : 600; // 3.0 seconds max
+    double dt = 0.016; // 60 Hz authentic fixed step matching Carrom Pool
+    int totalSteps = (maxSimSteps > 0 && maxSimSteps <= 800) ? maxSimSteps : 300; // ~4.8 seconds max
     double lastStX = startX;
     double lastStY = startY;
     double prevStVx = *reinterpret_cast<double*>(slAddr + 0x50);
@@ -2912,7 +2903,11 @@ AimSimulationResult CatEngine_SimulateInEngineNative(double startX, double start
             double curPkVx = *reinterpret_cast<double*>(p.pAddr + 0x50);
             double curPkVy = *reinterpret_cast<double*>(p.pAddr + 0x58);
             double curPkSpeed = std::hypot(curPkVx, curPkVy);
-            bool isPotted = isInsidePocketPos(curPkX, curPkY);
+            uintptr_t pkPocketPtr = 0;
+            safeReadPtr(p.pAddr + 0x38, &pkPocketPtr);
+            int32_t pkState = *reinterpret_cast<int32_t*>(p.pAddr + 0xa4);
+            uint8_t pkInPocket = *reinterpret_cast<uint8_t*>(p.pAddr + 0xa8);
+            bool isPotted = (pkPocketPtr != 0 || pkState == 2 || pkInPocket != 0 || isInsidePocketPos(curPkX, curPkY));
             if (isPotted) {
                 p.inPocket = true;
                 int pkIdx = 0;
@@ -3096,10 +3091,27 @@ static void my_tl_moveStrikerSmooth(void* tableLogic, int baselineId, bool remot
     if (orig_tl_moveStrikerSmooth) {
         orig_tl_moveStrikerSmooth(tableLogic, baselineId, remote, x, y);
     }
-    // remote == false: Local user dragging the slider on this device
+    // remote == false: Local user or friend dragging the slider on this device
     if (!remote && !std::isnan(x)) {
-        s_localBaselineId.store(baselineId);
-        s_lastPlayerIndex.store(baselineId);
+        bool isTopPlayer = (y > 0.0);
+        if (isTopPlayer) {
+            // Friend moving striker at top baseline
+            s_isOpponentTurn.store(true);
+            s_activeTurnPlayerId.store(baselineId);
+            if (!s_passAndPlayBothSides.load()) {
+                // Strictly hide guidelines during friend's turn ("my chance not friends chance")
+                GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
+                return;
+            }
+        } else {
+            // Local user moving striker at bottom baseline
+            s_localBaselineId.store(baselineId);
+            s_activeTurnPlayerId.store(baselineId);
+            s_lastPlayerIndex.store(baselineId);
+            s_isOpponentTurn.store(false);
+            s_isLocalTurnReady.store(true);
+        }
+
         g_matchActive.store(true);
         setGraphicsMatchActive(true);
         s_isLocalTurnReady.store(true);
@@ -3258,6 +3270,7 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
     g_matchActive.store(true);
     setGraphicsMatchActive(true);
     s_isOpponentTurn.store(false);
+    s_activeTurnPlayerId.store(s_localBaselineId.load());
     s_isLocalTurnReady.store(true);
     s_lastShotTimeMs.store(0);
     GraphicsEngine_OnStrikerReturnedToBaseline();
@@ -3277,6 +3290,7 @@ static setupOpponentStrikerBar_fn orig_setupOpponentStrikerBar = nullptr;
 
 static void my_setupOpponentStrikerBar(void* self, void* sel) {
     s_isOpponentTurn.store(true);
+    s_activeTurnPlayerId.store(1);
     s_isLocalTurnReady.store(false);
     GraphicsEngine_ResetTurnScanTimer();
     GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);

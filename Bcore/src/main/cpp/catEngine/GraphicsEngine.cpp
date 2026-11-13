@@ -39,6 +39,7 @@ static std::atomic<int> s_colorTheme{0};
 static std::atomic<bool> s_showPrediction{true};
 static std::atomic<bool> s_showPocket{true};
 static std::atomic<bool> s_showBaselineGuides{false};
+static std::atomic<bool> s_passAndPlayBothSides{false};
 static std::atomic<float> s_lineTransparency{1.0f};
 static std::atomic<bool> s_keepLineAfterShot{true};
 static std::atomic<double> s_freezeBaselineX{0.0};
@@ -1086,12 +1087,11 @@ simulateStrikerTrajectoryUniversal(double startX, double startY,
             b.px = std::clamp(b.px, -boundLimit, boundLimit);
             b.py = std::clamp(b.py, -boundLimit, boundLimit);
 
-            // Check corner pocket capture (strictly within visual pocket
-            // detection circle)
+            // Check corner pocket capture (strictly within physical pocket hole entrance <= 1.80 cm)
             for (int p = 0; p < 4; p++) {
               double dP = std::hypot(b.px - pocketCenters[p][0],
                                      b.py - pocketCenters[p][1]);
-              if (dP <= pkRad) {
+              if (dP <= std::min(pkRad, 1.80f)) {
                 b.inPocket = true;
                 b.pocketIndex = p;
                 b.pocketCenterX = pocketCenters[p][0];
@@ -1631,6 +1631,15 @@ void GraphicsEngine_SetPhysicsEngineMode(int mode) {
 
 int GraphicsEngine_GetPhysicsEngineMode() { return s_physicsEngineMode.load(); }
 
+void GraphicsEngine_SetPassAndPlayBothSides(bool enable) {
+  s_passAndPlayBothSides.store(enable);
+  ALOGI("[CatEngine] Pass & Play Both Sides updated to: %s", (enable ? "ENABLED" : "DISABLED"));
+}
+
+bool GraphicsEngine_GetPassAndPlayBothSides() {
+  return s_passAndPlayBothSides.load();
+}
+
 static inline AimSimulationResult
 simulateStrikerTrajectory(double startX, double startY, double shotAngle,
                           double forceVal, int maxSimSteps = 5000) {
@@ -1768,57 +1777,10 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         calibrated = true;
       }
     }
-    bool usedNativeAffine = false;
-    if (s_hasNativeAffine.load()) {
-      double a = s_nativeAffineA.load();
-      double b = s_nativeAffineB.load();
-      double c = s_nativeAffineC.load();
-      double d = s_nativeAffineD.load();
-      double tx = s_nativeAffineTx.load();
-      double ty = s_nativeAffineTy.load();
-      double sc = std::hypot(a, b);
-      if (sc > 3.0 && std::abs(a) > 1e-4 && std::abs(d) > 1e-4) {
-        if (width > 540.0f && tx < width * 0.45f && tx > 50.0f) {
-          double factor = static_cast<double>(width) / 540.0;
-          a *= factor;
-          b *= factor;
-          c *= factor;
-          d *= factor;
-          tx *= factor;
-          ty *= factor;
-          sc *= factor;
-        }
-        buildNativeAffineTableMatrix(tableMVP, static_cast<float>(width),
-                                     static_cast<float>(height), a, b, c, d, tx, ty);
-        boardScale = static_cast<float>(sc);
-        boardCenterX = static_cast<float>(tx);
-        boardCenterY = static_cast<float>(ty);
-        calibrated = true;
-        usedNativeAffine = true;
-      }
-    }
-    if (!usedNativeAffine) {
-      if (!calibrated && s_hasEngineCalibration.load()) {
-        float cx = s_autoCenterX.load();
-        float cy = s_autoCenterY.load();
-        float sc = s_autoScale.load();
-        if (width > 540.0f && cx < width * 0.45f && cx > 50.0f) {
-          float factor = static_cast<float>(width) / 540.0f;
-          cx *= factor;
-          cy *= factor;
-          sc *= factor;
-        }
-        if (sc > 5.0f && cx >= width * 0.35f && cx <= width * 0.65f) {
-          boardCenterX = cx;
-          boardCenterY = cy;
-          boardScale = sc;
-          calibrated = true;
-        }
-      }
-      buildUniversalTableMatrix(tableMVP, static_cast<float>(width),
-                                static_cast<float>(height), boardCenterX,
-                                boardCenterY, boardScale);
-    }
+    // Universal Table Matrix: Perfectly centered on the physical screen without design resolution skew
+    buildUniversalTableMatrix(tableMVP, static_cast<float>(width),
+                              static_cast<float>(height), boardCenterX,
+                              boardCenterY, boardScale);
 
     float feather = (boardScale > 0.1f) ? (1.2f / boardScale) : 0.045f;
 
@@ -2066,7 +2028,7 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
 
     // Render the 4 Corner Pocket Detection Guides (clean, unobtrusive
     // wireframe)
-    if (s_showPocket.load()) {
+    if (s_showPocket.load() && (localTurnReady || s_passAndPlayBothSides.load())) {
       for (int p = 0; p < 4; p++) {
         float pcx = pocketCenters[p][0];
         float pcy = pocketCenters[p][1];
@@ -2090,7 +2052,7 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
 
     // Render subtle ring ONLY on the target puck being aimed at (never obscure
     // coins with filled discs)
-    if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0) {
+    if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0 && (localTurnReady || s_passAndPlayBothSides.load())) {
       std::lock_guard<std::mutex> lock(s_puckMutex);
       for (const auto &pe : s_puckList) {
         if (pe.id == sim.firstContactPuckId && pe.active &&
@@ -2117,13 +2079,15 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                         stColor.r, stColor.g, stColor.b, 0.45f * lineAlpha);
       }
     } else {
-      // Live striker circle on baseline
-      drawTableCircle(tableMVP, feather, strikerCircleX, strikerCircleY,
-                      stRadius, stColor.r, stColor.g, stColor.b,
-                      0.45f * lineAlpha);
+      // Live striker circle on baseline (strictly active player's turn or when both sides enabled)
+      if (localTurnReady || s_passAndPlayBothSides.load()) {
+        drawTableCircle(tableMVP, feather, strikerCircleX, strikerCircleY,
+                        stRadius, stColor.r, stColor.g, stColor.b,
+                        0.45f * lineAlpha);
+      }
     }
 
-    if (hasSim && s_showPrediction.load()) {
+    if (hasSim && s_showPrediction.load() && (localTurnReady || s_passAndPlayBothSides.load())) {
       if (sim.strikerInPocket || isIllegalTarget) {
         // Warning Red line for scratch foul or illegal target!
         stColor = {1.0f, 0.18f, 0.18f, 1.0f};
