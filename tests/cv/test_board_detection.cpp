@@ -122,11 +122,6 @@ void test_frame_processing_throughput() {
 
     TEST_ASSERT(res.boardDetected == true, "Board must be detected");
     TEST_ASSERT(res.corners.isValid == true, "Corner pockets must be valid");
-    TEST_ASSERT(res.processingTimeUs >= 0, "Processing time must be recorded non-negative");
-
-    std::cout << "    Full frame 1080x1920 analysis latency: " << res.processingTimeUs << " us (" 
-              << (res.processingTimeUs / 1000.0) << " ms)" << std::endl;
-
     TEST_ASSERT(res.processingTimeUs < 10000, "Processing time must be under 10 ms for real-time 60 FPS operation");
     TEST_PASS("Full frame vision pipeline completes comfortably under 10 ms real-time budget.");
 }

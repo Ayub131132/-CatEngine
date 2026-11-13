@@ -74,7 +74,7 @@ static inline bool resolveDiscDiscContact(BodyInternal& bi, BodyInternal& bj,
                                           const PhysicsConfig& config,
                                           SimResult& result,
                                           bool recordSegments) {
-    if (bi.inPocket || bj.inPocket) return false;
+    if (bi.inPocket || bi.inPocketDrop || bj.inPocket || bj.inPocketDrop) return false;
 
     double cdx = bi.px - bj.px;
     double cdy = bi.py - bj.py;
@@ -107,63 +107,56 @@ static inline bool resolveDiscDiscContact(BodyInternal& bi, BodyInternal& bj,
     double relNorm = v1n - v2n;
 
     // If bodies are separating along the contact normal, do not apply attractive impulse
-    if (relNorm >= -1e-5) {
+    if (relNorm >= -1e-6) {
         return false;
     }
 
-    // 3. Authentic spin transfer (libgame.so 0x1998a8c)
+    // 3. Orthonormal tangent vector t = (-ny, nx)
     double tx = -ny;
     double ty = nx;
     double v1t = bi.vx * tx + bi.vy * ty;
     double v2t = bj.vx * tx + bj.vy * ty;
 
-    // Contact slip for Body 1
-    double v_slip1 = v1t - bi.wz * bi.radius;
-    double sgn1 = (v_slip1 > 0.0) ? 1.0 : -1.0;
-    double J1 = std::min(0.40 * std::abs(v1n), std::abs(v_slip1) / 2.5);
-    bi.wz += (2.5 * J1 * sgn1) / bi.radius;
-
-    // Contact slip for Body 2
-    double v_slip2 = v2t - bj.wz * bj.radius;
-    double sgn2 = (v_slip2 > 0.0) ? 1.0 : -1.0;
-    double J2 = std::min(0.40 * std::abs(v2n), std::abs(v_slip2) / 2.5);
-    bj.wz += (2.5 * J2 * sgn2) / bj.radius;
-
-    // 4. 1D Elastic Normal Momentum Exchange
+    // 4. Elastic Normal Momentum Exchange
     double m1 = bi.mass;
     double m2 = bj.mass;
     double mSum = m1 + m2;
+    double mEffNorm = (m1 * m2) / mSum;
     double e = (config.restitutionBody > 0.0 && config.restitutionBody <= 1.0) ? config.restitutionBody : 1.00;
 
-    double v1n_prime = (m1 * v1n + m2 * v2n - m2 * e * relNorm) / mSum;
-    double v2n_prime = (m1 * v1n + m2 * v2n + m1 * e * relNorm) / mSum;
+    // Total normal impulse magnitude Jn > 0 (acting on bi along +n, bj along -n)
+    double Jn = (1.0 + e) * mEffNorm * (-relNorm);
 
-    // 4b. Cut-throw: oblique cut angle induces a small tangential deflection on
-    //     the struck disc (libgame.so physics confirmed: ~2% of normal impulse at 45°).
-    //     cutThrowFactor is adaptively learned per session by AdaptiveLearningEngine.
-    double normalImpulseMag = std::abs(m2 * e * relNorm / mSum);
-    double cutAngle = std::atan2(std::abs(v1t - v2t), std::max(0.001, std::abs(v1n - v2n)));
-    double throwScale = config.cutThrowFactor * std::sin(cutAngle) * normalImpulseMag;
-    // Apply to struck disc (bj) only — small tangential velocity perturbation
-    double throwSign = (v1t - v2t > 0.0) ? 1.0 : -1.0;
-    double throwVx = throwSign * throwScale * tx;
-    double throwVy = throwSign * throwScale * ty;
+    // 5. Tangential Contact Slip & Friction Impulse (Cut-Throw)
+    // Contact point on bi is at -bi.radius * n; on bj is at +bj.radius * n.
+    // Tangential contact velocities:
+    // v_ci,t = v1t - bi.wz * bi.radius
+    // v_cj,t = v2t + bj.wz * bj.radius
+    double v_slip = (v1t - v2t) - (bi.wz * bi.radius + bj.wz * bj.radius);
 
-    // Reconstruct post-collision Cartesian velocities
-    bi.vx = v1n_prime * nx + v1t * tx;
-    bi.vy = v1n_prime * ny + v1t * ty;
+    // Rotational inertia factor: R^2 / I = 2.5 / m (libgame.so 0x1998a8c rim-weighted disc)
+    // Tangential effective mass: mEffTang = mEffNorm / 3.5
+    double mEffTang = mEffNorm / 3.5;
+    double Jt_stick = -mEffTang * v_slip;
 
-    bj.vx = v2n_prime * nx + v2t * tx + throwVx;
-    bj.vy = v2n_prime * ny + v2t * ty + throwVy;
+    // Coulomb friction impulse limit: Jt_max = mu_contact * Jn
+    double muContact = (config.cutThrowFactor > 0.0) ? config.cutThrowFactor : 0.040;
+    double Jt_max = muContact * Jn;
+    double Jt = std::clamp(Jt_stick, -Jt_max, Jt_max);
+
+    // 6. Apply equal and opposite impulses to both bodies (Newton's 3rd Law & Conservation of Momentum)
+    // Normal impulse: +Jn along n on bi, -Jn along n on bj
+    // Tangential impulse: +Jt along t on bi, -Jt along t on bj
+    bi.vx += (Jn * nx + Jt * tx) / m1;
+    bi.vy += (Jn * ny + Jt * ty) / m1;
+    bi.wz -= (2.5 * Jt) / (m1 * bi.radius);
+
+    bj.vx -= (Jn * nx + Jt * tx) / m2;
+    bj.vy -= (Jn * ny + Jt * ty) / m2;
+    bj.wz -= (2.5 * Jt) / (m2 * bj.radius);
 
     bi.r_omega = std::hypot(bi.vx, bi.vy);
     bj.r_omega = std::hypot(bj.vx, bj.vy);
-
-    // Equilibrium spin alignment to maintain pure rolling post-collision
-    bi.wx = bi.vy / bi.radius;
-    bi.wy = -bi.vx / bi.radius;
-    bj.wx = bj.vy / bj.radius;
-    bj.wy = -bj.vx / bj.radius;
 
     bi.lastSegAngle = std::atan2(bi.vy, bi.vx);
     bj.lastSegAngle = std::atan2(bj.vy, bj.vx);
@@ -171,7 +164,7 @@ static inline bool resolveDiscDiscContact(BodyInternal& bi, BodyInternal& bj,
     double spd1 = std::hypot(bi.vx, bi.vy);
     double spd2 = std::hypot(bj.vx, bj.vy);
 
-    // 5. Track impact speed and causality
+    // 7. Track impact speed and causality
     if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
         bj.hitByEntityId = (bi.id == -1) ? 0 : bi.id;
         bj.hitSpeed = spd1;
@@ -192,7 +185,7 @@ static inline bool resolveDiscDiscContact(BodyInternal& bi, BodyInternal& bj,
         }
     }
 
-    // 6. Chain level assignment
+    // 8. Chain level assignment
     if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
         bj.chainLevel = bi.chainLevel + 1;
         if (bj.segments.empty()) {
@@ -207,7 +200,7 @@ static inline bool resolveDiscDiscContact(BodyInternal& bi, BodyInternal& bj,
         }
     }
 
-    // 7. Striker first impact record
+    // 9. Striker first impact record
     if (bi.id == -1 && !result.hasFirstContact) {
         result.hasFirstContact = true;
         result.firstImpactStrikerX = static_cast<float>(bi.px);
@@ -267,7 +260,7 @@ static inline bool resolveDiscDiscContact(BodyInternal& bi, BodyInternal& bj,
 static inline void resolveCushionBounce(BodyInternal& b, double thetaCushion,
                                         const PhysicsConfig& config,
                                         bool recordSegments) {
-    if (b.inPocket) return;
+    if (b.inPocket || b.inPocketDrop) return;
 
     double cosTh = std::cos(thetaCushion);
     double sinTh = std::sin(thetaCushion);
@@ -284,16 +277,12 @@ static inline void resolveCushionBounce(BodyInternal& b, double thetaCushion,
     // Authentic TableLogic + 0x1b0 table cushion damping (libgame.so 0x1998bc4 & 0x1998bcc)
     double e_body = (config.restitutionBody > 0.0) ? config.restitutionBody : 1.00;
     double vn_prime = -vn * e_body * config.restitutionCushion;
-    double vt_prime = vt + (delta_vt / 2.5);
+    double vt_prime = vt + delta_vt;
     b.wz -= (2.5 * delta_vt) / b.radius;
 
     // Rotated velocities back into world coordinates (libgame.so 0x1998c10 & 0x1998c14)
     b.vx = cosTh * vt_prime + sinTh * vn_prime;
     b.vy = cosTh * vn_prime - sinTh * vt_prime;
-
-    // Authentic cushion angular momentum update & rolling equilibrium
-    b.wx = b.vy / b.radius;
-    b.wy = -b.vx / b.radius;
 
     b.r_omega = std::hypot(b.vx, b.vy);
     b.lastSegAngle = std::atan2(b.vy, b.vx);
@@ -409,21 +398,43 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
         { -config.pocketInset, -config.pocketInset }  // Pocket 3: Bottom-Left
     };
 
-    // Setup authentic cushion polygon (libgame.so TableLogic + 0x198)
-    std::vector<Point2D> tablePolygon = config.cushionVertices;
-    if (tablePolygon.size() < 3) {
-        // Default authentic Carrom Pool table octagon (37.0 cm board with corner pocket bevels)
+    // Setup authentic cushion segments and rounded jaw vertices
+    struct CushionDef {
+        Point2D A;
+        Point2D B;
+        double tangentAngle;
+    };
+
+    std::vector<CushionDef> cushions;
+    std::vector<Point2D> jawVertices;
+
+    if (config.cushionVertices.size() >= 3) {
+        // Custom polygon from caller
+        const size_t nv = config.cushionVertices.size();
+        for (size_t k = 0; k < nv; k++) {
+            const auto& pA = config.cushionVertices[k];
+            const auto& pB = config.cushionVertices[(k + 1) % nv];
+            double dx = pB.x - pA.x;
+            double dy = pB.y - pA.y;
+            cushions.push_back({ pA, pB, -std::atan2(dy, dx) });
+            jawVertices.push_back(pA);
+        }
+    } else {
+        // Default authentic Carrom Pool table: 4 flat cushions with open corner pockets
         const double h = config.boardHalfSize;       // 37.00 cm
         const double c = config.pocketJawCutoff;     // 32.80 cm
-        tablePolygon = {
-            { -c,  h }, // 0: Top cushion left
-            {  c,  h }, // 1: Top cushion right
-            {  h,  c }, // 2: Top-Right bevel start
-            {  h, -c }, // 3: Right cushion bottom
-            {  c, -h }, // 4: Bottom-Right bevel start
-            { -c, -h }, // 5: Bottom cushion left
-            { -h, -c }, // 6: Bottom-Left bevel start
-            { -h,  c }  // 7: Left cushion top
+        cushions = {
+            { { -c,  h }, {  c,  h }, 0.0 },              // Top cushion: normal points DOWN
+            { {  h,  c }, {  h, -c }, -M_PI / 2.0 },      // Right cushion: normal points LEFT
+            { {  c, -h }, { -c, -h }, M_PI },             // Bottom cushion: normal points UP
+            { { -h, -c }, { -h,  c }, M_PI / 2.0 }        // Left cushion: normal points RIGHT
+        };
+        // 8 cushion jaw corners (endpoints of the 4 cushions)
+        jawVertices = {
+            { -c,  h }, {  c,  h },
+            {  h,  c }, {  h, -c },
+            {  c, -h }, { -c, -h },
+            { -h, -c }, { -h,  c }
         };
     }
 
@@ -459,11 +470,11 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
             // -------------------------------------------------------------
             for (size_t i = 0; i < bodies.size(); i++) {
                 const auto& bi = bodies[i];
-                if (bi.inPocket) continue;
+                if (bi.inPocket || bi.inPocketDrop) continue;
 
                 for (size_t j = i + 1; j < bodies.size(); j++) {
                     const auto& bj = bodies[j];
-                    if (bj.inPocket) continue;
+                    if (bj.inPocket || bj.inPocketDrop) continue;
 
                     if (std::hypot(bi.vx, bi.vy) <= minSpeed && std::hypot(bj.vx, bj.vy) <= minSpeed) {
                         continue;
@@ -514,42 +525,37 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
             // -------------------------------------------------------------
             // B. Authentic Cushion Segment & Corner CCD (libgame.so 0x19984cc & 0x19985e0)
             // -------------------------------------------------------------
-            const size_t numVerts = tablePolygon.size();
             for (size_t i = 0; i < bodies.size(); i++) {
                 const auto& b = bodies[i];
-                if (b.inPocket) continue;
+                if (b.inPocket || b.inPocketDrop) continue;
                 if (std::hypot(b.vx, b.vy) <= minSpeed) continue;
 
-                for (size_t k = 0; k < numVerts; k++) {
-                    const auto& A = tablePolygon[k];
-                    const auto& B = tablePolygon[(k + 1) % numVerts];
+                // 1. Check straight cushion segments
+                for (const auto& cush : cushions) {
+                    const auto& A = cush.A;
+                    const auto& B = cush.B;
 
                     double dx = B.x - A.x;
                     double dy = B.y - A.y;
                     double L = std::hypot(dx, dy);
                     if (L < 1e-6) continue;
 
-                    // Relative cross product: (B - A) x v
                     double cross = dx * b.vy - dy * b.vx;
                     if (std::abs(cross) < 1e-9) continue;
 
                     double invL = 1.0 / L;
-                    // Inward unit normal for clockwise polygon: (dy / L, -dx / L)
                     double nx = dy * invL;
                     double ny = -dx * invL;
 
-                    // Body must be moving towards cushion: normal . v < 0
                     double vNorm = nx * b.vx + ny * b.vy;
                     if (vNorm >= 0.0) continue;
 
-                    // Point on disc closest to segment along -normal
                     double px_edge = b.px - nx * b.radius;
                     double py_edge = b.py - ny * b.radius;
 
                     double Dx = px_edge - A.x;
                     double Dy = py_edge - A.y;
 
-                    // Parametric coordinate u along segment (0 to 1)
                     double u = (Dx * b.vy - Dy * b.vx) / cross;
                     if (u >= 0.0 && u <= 1.0) {
                         double tHit = (dx * Dy - dy * Dx) / (-cross);
@@ -557,13 +563,15 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
                             earliestT = tHit;
                             eventType = 2; // Segment bounce
                             eventI = i;
-                            eventCushionNormalAngle = -std::atan2(dy, dx);
+                            eventCushionNormalAngle = cush.tangentAngle;
                         }
                     }
+                }
 
-                    // Rounded corner check at vertex A (libgame.so 0x1B3703C & 0x19985e0)
-                    double rx = A.x - b.px;
-                    double ry = A.y - b.py;
+                // 2. Check rounded cushion jaw corners
+                for (const auto& V : jawVertices) {
+                    double rx = V.x - b.px;
+                    double ry = V.y - b.py;
                     double B_corner = -2.0 * (rx * b.vx + ry * b.vy);
                     if (B_corner < 0.0) {
                         double A_corner = b.vx * b.vx + b.vy * b.vy;
@@ -576,11 +584,10 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
                                 double tHitCorner = (-B_corner - std::sqrt(discCorner)) / (2.0 * A_corner);
                                 if (tHitCorner >= 0.0 && tHitCorner < earliestT) {
                                     earliestT = tHitCorner;
-                                    eventType = 2; // Corner bounce
+                                    eventType = 2; // Jaw corner bounce
                                     eventI = i;
-                                    double cnx = (b.px + b.vx * tHitCorner) - A.x;
-                                    double cny = (b.py + b.vy * tHitCorner) - A.y;
-                                    // Authentic libgame.so (0x1B2C864-0x1B2C87C): theta = -atan2(Nx, -Ny) where N = P - A
+                                    double cnx = (b.px + b.vx * tHitCorner) - V.x;
+                                    double cny = (b.py + b.vy * tHitCorner) - V.y;
                                     eventCushionNormalAngle = -std::atan2(cnx, -cny);
                                 }
                             }
@@ -596,9 +603,9 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
                 for (int iter = 0; iter < 10; ++iter) {
                     bool anyImpulse = false;
                     for (size_t i = 0; i < bodies.size(); i++) {
-                        if (bodies[i].inPocket) continue;
+                        if (bodies[i].inPocket || bodies[i].inPocketDrop) continue;
                         for (size_t j = i + 1; j < bodies.size(); j++) {
-                            if (bodies[j].inPocket) continue;
+                            if (bodies[j].inPocket || bodies[j].inPocketDrop) continue;
                             double cdx = bodies[i].px - bodies[j].px;
                             double cdy = bodies[i].py - bodies[j].py;
                             double dSq = cdx * cdx + cdy * cdy;
@@ -634,14 +641,14 @@ SimResult simulate(double startX, double startY, double shotAngle, double forceV
                             double dx = pocketCenters[p][0] - b.px;
                             double dy = pocketCenters[p][1] - b.py;
                             double dSq = dx * dx + dy * dy;
-                            double dropRadius = std::min(static_cast<double>(config.pocketRadius), 2.15);
+                            // Physical pocket capture threshold:
+                            // Striker radius is 2.65 cm, puck radius is 1.95 cm.
+                            double dropRadius = (b.id == -1) ? config.pocketRadius : std::min(static_cast<double>(config.pocketRadius), 2.35);
                             if (dSq <= dropRadius * dropRadius) {
                                 double curSpd = std::hypot(b.vx, b.vy);
-                                // Vector from body to pocket center is (dx, dy).
-                                // Velocity dot product: dotVel > 0 means moving towards pocket center!
                                 double dotVel = dx * b.vx + dy * b.vy;
-                                bool movingTowards = (dSq <= 1.20 * 1.20) || (dotVel > 0.0);
-                                bool speedValid = (dSq <= 1.40 * 1.40) ? (curSpd <= config.pocketDropMaxSpeed) : (curSpd <= 180.0);
+                                bool movingTowards = (dSq <= 1.40 * 1.40) || (dotVel > 0.0);
+                                bool speedValid = (curSpd <= config.pocketDropMaxSpeed);
                                 bool canDrop = movingTowards && speedValid;
                                 if (canDrop && !b.inPocketDrop) {
                                     b.inPocketDrop = true;

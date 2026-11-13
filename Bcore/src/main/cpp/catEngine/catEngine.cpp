@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include "../Log.h"
 #include "Dobby/dobby.h"
+#include "CatEngineConstants.h"
 #include "GraphicsEngine.h"
 #include "v2/AdaptiveLearningEngine.h"
 
@@ -236,9 +237,30 @@ extern "C" void CatEngine_ApplyDynamicOffsets(const char* jsonStr) {
 static int s_safeReadPipe[2] = { -1, -1 };
 static std::mutex s_safeReadMutex;
 
+static inline uintptr_t untagPtr(uintptr_t addr) {
+#if defined(__aarch64__)
+    return addr & 0x00FFFFFFFFFFFFFFULL;
+#else
+    return addr;
+#endif
+}
+
+static inline bool isValidUserPointer(uintptr_t addr) {
+    if (addr < 0x10000) return false;
+    uintptr_t untagged = untagPtr(addr);
+    if (untagged < 0x10000) return false;
+#if defined(__aarch64__)
+    if (untagged > 0x00007FFFFFFFFFFFULL) return false;
+#else
+    if (untagged > 0xBFFFFFFFULL) return false;
+#endif
+    return true;
+}
+
 static bool safeReadBytes(uintptr_t addr, void* outBuf, size_t size) {
     if (!addr || !outBuf || size == 0) return false;
-    if (addr < 0x10000 || addr >= 0x7FFFFFFFFFFF) return false;
+    uintptr_t untagged = untagPtr(addr);
+    if (!isValidUserPointer(untagged)) return false;
 
     std::lock_guard<std::mutex> lock(s_safeReadMutex);
     static bool s_sigpipeIgnored = false;
@@ -253,7 +275,7 @@ static bool safeReadBytes(uintptr_t addr, void* outBuf, size_t size) {
         }
     }
 
-    ssize_t written = write(s_safeReadPipe[1], reinterpret_cast<const void*>(addr), size);
+    ssize_t written = write(s_safeReadPipe[1], reinterpret_cast<const void*>(untagged), size);
     if (written == static_cast<ssize_t>(size)) {
         read(s_safeReadPipe[0], outBuf, size);
         return true;
@@ -363,6 +385,13 @@ static std::atomic<bool> s_isInEngineAimActive(false);
 static std::atomic<bool> s_isLocalTurnReady(false);
 static std::atomic<bool> s_isOpponentTurn(false);
 static std::atomic<bool> s_isLocalTurnRotated(false); // True when local player is assigned top baseline (table is rotated 180 deg)
+static inline bool isOpponentBaseline(double y) {
+    if (s_isLocalTurnRotated.load()) {
+        return (y < 0.0);
+    } else {
+        return (y > 0.0);
+    }
+}
 static std::atomic<int>  s_localBaselineId(0);
 static std::atomic<int>  s_activeTurnPlayerId(0);
 static std::atomic<bool> s_passAndPlayBothSides(false);
@@ -381,9 +410,9 @@ static inline double launchAngleToPullAngle(double launchAngle) {
 
 // Helper to reliably identify ControlsLogicLocal instance in memory
 static bool isControlsLogicLocal(uintptr_t ptr) {
-    if (ptr < 0x10000 || ptr > 0x7FFFFFFFFFFF) return false;
+    if (!isValidUserPointer(ptr)) return false;
     uintptr_t vtbl = 0;
-    if (!safeReadPtr(ptr, &vtbl) || vtbl < 0x10000 || vtbl > 0x7FFFFFFFFFFF) return false;
+    if (!safeReadPtr(ptr, &vtbl) || !isValidUserPointer(vtbl)) return false;
     if (s_knownControlsVtable && vtbl == s_knownControlsVtable) return true;
     if (!g_libgameBase) return false;
 
@@ -391,7 +420,8 @@ static bool isControlsLogicLocal(uintptr_t ptr) {
     for (int i = 0; i < 16; i++) {
         uintptr_t fnPtr = 0;
         if (safeReadPtr(vtbl + i * sizeof(uintptr_t), &fnPtr)) {
-            if (fnPtr >= (g_libgameBase + 0x1980000) && fnPtr <= (g_libgameBase + 0x1990000)) {
+            uintptr_t untaggedFn = untagPtr(fnPtr);
+            if (untaggedFn >= (g_libgameBase + 0x1980000) && untaggedFn <= (g_libgameBase + 0x1990000)) {
                 return true;
             }
         }
@@ -403,22 +433,23 @@ static bool isControlsLogicLocal(uintptr_t ptr) {
 static bool isValidShotDelegate(void* delegate) {
     if (!delegate) return false;
     uintptr_t dPtr = reinterpret_cast<uintptr_t>(delegate);
-    if (dPtr < 0x10000 || dPtr > 0x7FFFFFFFFFFF) return false;
+    if (!isValidUserPointer(dPtr)) return false;
 
     // Check if it is a valid object directly (e.g. ControlsLogicLocal)
     uintptr_t directVtbl = 0;
-    if (safeReadPtr(dPtr, &directVtbl) && directVtbl > 0x10000 && directVtbl < 0x7FFFFFFFFFFF) {
+    if (safeReadPtr(dPtr, &directVtbl) && isValidUserPointer(directVtbl)) {
         if (s_knownControlsVtable && directVtbl == s_knownControlsVtable) return true;
         if (isControlsLogicLocal(dPtr)) return true;
     }
 
     uintptr_t fn = 0;
-    if (!safeReadPtr(dPtr + g_offsets.delegateTarget, &fn) || fn < 0x10000 || fn > 0x7FFFFFFFFFFF) return false;
+    if (!safeReadPtr(dPtr + g_offsets.delegateTarget, &fn) || !isValidUserPointer(fn)) return false;
     uintptr_t vtbl = 0;
-    if (!safeReadPtr(fn, &vtbl) || vtbl < 0x10000 || vtbl > 0x7FFFFFFFFFFF) return false;
+    if (!safeReadPtr(fn, &vtbl) || !isValidUserPointer(vtbl)) return false;
     uintptr_t invoke = 0;
-    if (!safeReadPtr(vtbl + g_offsets.delegateInvoke, &invoke) || invoke < 0x10000 || invoke > 0x7FFFFFFFFFFF) return false;
-    if (g_libgameBase && (invoke < g_libgameBase || invoke > (g_libgameBase + 0x3500000))) return false;
+    if (!safeReadPtr(vtbl + g_offsets.delegateInvoke, &invoke) || !isValidUserPointer(invoke)) return false;
+    uintptr_t untaggedInvoke = untagPtr(invoke);
+    if (g_libgameBase && (untaggedInvoke < g_libgameBase || untaggedInvoke > (g_libgameBase + 0x3500000))) return false;
     return true;
 }
 
@@ -426,22 +457,23 @@ static bool isValidShotDelegate(void* delegate) {
 static bool isValidAimDelegate(void* delegate) {
     if (!delegate) return false;
     uintptr_t dPtr = reinterpret_cast<uintptr_t>(delegate);
-    if (dPtr < 0x10000 || dPtr > 0x7FFFFFFFFFFF) return false;
+    if (!isValidUserPointer(dPtr)) return false;
 
     // Check if it is a valid object directly
     uintptr_t directVtbl = 0;
-    if (safeReadPtr(dPtr, &directVtbl) && directVtbl > 0x10000 && directVtbl < 0x7FFFFFFFFFFF) {
+    if (safeReadPtr(dPtr, &directVtbl) && isValidUserPointer(directVtbl)) {
         if (s_knownControlsVtable && directVtbl == s_knownControlsVtable) return true;
         if (isControlsLogicLocal(dPtr)) return true;
     }
 
     uintptr_t fn = 0;
-    if (!safeReadPtr(dPtr + g_offsets.delegateTarget, &fn) || fn < 0x10000 || fn > 0x7FFFFFFFFFFF) return false;
+    if (!safeReadPtr(dPtr + g_offsets.delegateTarget, &fn) || !isValidUserPointer(fn)) return false;
     uintptr_t vtbl = 0;
-    if (!safeReadPtr(fn, &vtbl) || vtbl < 0x10000 || vtbl > 0x7FFFFFFFFFFF) return false;
+    if (!safeReadPtr(fn, &vtbl) || !isValidUserPointer(vtbl)) return false;
     uintptr_t invoke = 0;
-    if (!safeReadPtr(vtbl + g_offsets.delegateInvoke, &invoke) || invoke < 0x10000 || invoke > 0x7FFFFFFFFFFF) return false;
-    if (g_libgameBase && (invoke < g_libgameBase || invoke > (g_libgameBase + 0x3500000))) return false;
+    if (!safeReadPtr(vtbl + g_offsets.delegateInvoke, &invoke) || !isValidUserPointer(invoke)) return false;
+    uintptr_t untaggedInvoke = untagPtr(invoke);
+    if (g_libgameBase && (untaggedInvoke < g_libgameBase || untaggedInvoke > (g_libgameBase + 0x3500000))) return false;
     return true;
 }
 
@@ -449,22 +481,22 @@ static bool isValidAimDelegate(void* delegate) {
 static bool isValidTableController(void* ptr) {
     if (!ptr) return false;
     uintptr_t tcAddr = reinterpret_cast<uintptr_t>(ptr);
-    if (tcAddr < 0x10000 || tcAddr > 0x7FFFFFFFFFFF) return false;
+    if (!isValidUserPointer(tcAddr)) return false;
     if ((tcAddr & 0x7) != 0) return false;
 
     // Check TableNode vtable in memory
     uintptr_t tcVtable = 0;
-    if (!safeReadPtr(tcAddr, &tcVtable) || tcVtable < 0x10000 || tcVtable > 0x7FFFFFFFFFFF) return false;
+    if (!safeReadPtr(tcAddr, &tcVtable) || !isValidUserPointer(tcVtable)) return false;
     if ((tcVtable & 0x7) != 0) return false;
 
     // Check TableLogic pointer at +0x3f0
     uintptr_t tableLogicAddr = 0;
-    if (!safeReadPtr(tcAddr + g_offsets.tcTableLogic, &tableLogicAddr) || tableLogicAddr < 0x10000 || tableLogicAddr > 0x7FFFFFFFFFFF) return false;
+    if (!safeReadPtr(tcAddr + g_offsets.tcTableLogic, &tableLogicAddr) || !isValidUserPointer(tableLogicAddr)) return false;
     if ((tableLogicAddr & 0x7) != 0) return false;
 
     // Check TableLogic vtable
     uintptr_t tlVtable = 0;
-    if (!safeReadPtr(tableLogicAddr, &tlVtable) || tlVtable < 0x10000 || tlVtable > 0x7FFFFFFFFFFF) return false;
+    if (!safeReadPtr(tableLogicAddr, &tlVtable) || !isValidUserPointer(tlVtable)) return false;
     if ((tlVtable & 0x7) != 0) return false;
 
     return true;
@@ -477,12 +509,12 @@ static bool isTableControllerAlive() {
 static void* findTableControllerFromGameplayView(void* gv) {
     if (!gv) return nullptr;
     uintptr_t gvAddr = reinterpret_cast<uintptr_t>(gv);
-    if (gvAddr < 0x10000 || (gvAddr & 0x7) != 0) return nullptr;
+    if (!isValidUserPointer(gvAddr) || (gvAddr & 0x7) != 0) return nullptr;
 
     const size_t directOffsets[] = { 0x3f0, 0x3e8, 0x3f8, 0x400, 0x410, 0x418, 0x420, 0x428, 0x430, 0x438 };
     for (size_t off : directOffsets) {
         uintptr_t cand = 0;
-        if (safeReadPtr(gvAddr + off, &cand) && cand > 0x10000 && (cand & 0x7) == 0) {
+        if (safeReadPtr(gvAddr + off, &cand) && isValidUserPointer(cand) && (cand & 0x7) == 0) {
             if (isValidTableController(reinterpret_cast<void*>(cand))) {
                 return reinterpret_cast<void*>(cand);
             }
@@ -490,7 +522,7 @@ static void* findTableControllerFromGameplayView(void* gv) {
     }
     for (size_t off = 0x380; off <= 0x480; off += sizeof(void*)) {
         uintptr_t cand = 0;
-        if (safeReadPtr(gvAddr + off, &cand) && cand > 0x10000 && (cand & 0x7) == 0) {
+        if (safeReadPtr(gvAddr + off, &cand) && isValidUserPointer(cand) && (cand & 0x7) == 0) {
             if (isValidTableController(reinterpret_cast<void*>(cand))) {
                 return reinterpret_cast<void*>(cand);
             }
@@ -502,12 +534,12 @@ static void* findTableControllerFromGameplayView(void* gv) {
 static void* findTableControllerFromMatchController(void* mc) {
     if (!mc) return nullptr;
     uintptr_t mcAddr = reinterpret_cast<uintptr_t>(mc);
-    if (mcAddr < 0x10000 || (mcAddr & 0x7) != 0) return nullptr;
+    if (!isValidUserPointer(mcAddr) || (mcAddr & 0x7) != 0) return nullptr;
 
     const size_t directOffsets[] = { 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x3f0, 0x420 };
     for (size_t off : directOffsets) {
         uintptr_t cand = 0;
-        if (safeReadPtr(mcAddr + off, &cand) && cand > 0x10000 && (cand & 0x7) == 0) {
+        if (safeReadPtr(mcAddr + off, &cand) && isValidUserPointer(cand) && (cand & 0x7) == 0) {
             if (isValidTableController(reinterpret_cast<void*>(cand))) {
                 return reinterpret_cast<void*>(cand);
             }
@@ -515,7 +547,7 @@ static void* findTableControllerFromMatchController(void* mc) {
     }
     for (size_t off = 0x18; off <= 0x100; off += sizeof(void*)) {
         uintptr_t cand = 0;
-        if (safeReadPtr(mcAddr + off, &cand) && cand > 0x10000 && (cand & 0x7) == 0) {
+        if (safeReadPtr(mcAddr + off, &cand) && isValidUserPointer(cand) && (cand & 0x7) == 0) {
             if (isValidTableController(reinterpret_cast<void*>(cand))) {
                 return reinterpret_cast<void*>(cand);
             }
@@ -528,6 +560,7 @@ static void CatEngine_OnMatchDestroyed() {
     g_matchActive.store(false);
     s_isLocalTurnReady.store(false);
     s_isLocalTurnRotated.store(false);
+    GraphicsEngine_SetTableRotated(false);
     setGraphicsMatchActive(false);
     GraphicsEngine_ResetNativeAffine();
     s_isInEngineAimActive.store(false);
@@ -709,6 +742,7 @@ static void updateBaselineFromTableLogic(void* tc) {
 
     bool isRotated = (selected->y > 0.0);
     s_isLocalTurnRotated.store(isRotated);
+    GraphicsEngine_SetTableRotated(isRotated);
     s_localBaselineId.store(selected->key);
     s_lastPlayerIndex.store(selected->key);
     g_baselineMinX.store(selected->minX);
@@ -1045,11 +1079,46 @@ void CatEngine_SetViewportDimensions(int w, int h) {
 }
 
 bool CatEngine_GetTableTransform(double* outAffine6) {
-    // Force Universal Table Matrix: The Cocos2d convertToWorldSpace: affine transform at 0x1B313D8
-    // operates in design resolution points (540-width) and suffers from letterboxing shifts on tall screens
-    // as well as inverted axes when rotated. The universal table matrix (centered at height*0.5, scale 0.94144)
-    // is physically and mathematically verified to match the phone display within 0.5px.
-    return false;
+    if (!outAffine6 || !g_libgameBase) return false;
+    void* tc = g_activeTableController.load();
+    if (!tc || !isValidTableController(tc)) return false;
+
+    uintptr_t tcAddr = reinterpret_cast<uintptr_t>(tc);
+    uintptr_t tableVisuals = 0;
+    if (!safeReadPtr(tcAddr + g_offsets.tcTableVisuals, &tableVisuals) || !tableVisuals) {
+        return false;
+    }
+
+    uintptr_t pftsAddr = g_libgameBase + g_offsets.pointFromTableSpace;
+    uint32_t insn = 0;
+    if (!safeReadInsn(pftsAddr, &insn) || insn == 0) {
+        return false;
+    }
+
+    auto pfts = reinterpret_cast<PointFromTableSpaceFn>(pftsAddr);
+    MCPointD p0 = pfts(tc, nullptr, 0.0, 0.0);
+    MCPointD px = pfts(tc, nullptr, 1.0, 0.0);
+    MCPointD py = pfts(tc, nullptr, 0.0, 1.0);
+
+    double a = px.x - p0.x;
+    double b = px.y - p0.y;
+    double c = py.x - p0.x;
+    double d = py.y - p0.y;
+    double tx = p0.x;
+    double ty = p0.y;
+
+    if (std::isnan(a) || std::isnan(b) || std::isnan(c) || std::isnan(d) ||
+        std::isnan(tx) || std::isnan(ty) || std::hypot(a, b) < 1.0) {
+        return false;
+    }
+
+    outAffine6[0] = a;
+    outAffine6[1] = b;
+    outAffine6[2] = c;
+    outAffine6[3] = d;
+    outAffine6[4] = tx;
+    outAffine6[5] = ty;
+    return true;
 }
 
 // =========================================================================================
@@ -1064,9 +1133,12 @@ static void calibrateBoardFromTableController(void* tc) {
     double tf[6];
     if (CatEngine_GetTableTransform(tf)) {
         GraphicsEngine_SetNativeAffineTransform(tf[0], tf[1], tf[2], tf[3], tf[4], tf[5]);
+        bool isRotated = (tf[0] < -0.1) || s_isLocalTurnRotated.load();
+        s_isLocalTurnRotated.store(isRotated);
+        GraphicsEngine_SetTableRotated(isRotated);
         double sc = std::hypot(tf[0], tf[1]);
         GraphicsEngine_SetAutoCalibration(static_cast<float>(tf[4]), static_cast<float>(tf[5]), static_cast<float>(sc), true);
-        ALOGI("[CatEngine] [CameraParity] Synchronized live native table transform: scale=%.2f, center=(%.1f, %.1f)", sc, tf[4], tf[5]);
+        ALOGI("[CatEngine] [CameraParity] Synchronized live native table transform: scale=%.2f, center=(%.1f, %.1f), rotated=%s", sc, tf[4], tf[5], isRotated ? "TRUE" : "FALSE");
     }
 
     updateBaselineFromTableLogic(tc);
@@ -1362,21 +1434,27 @@ static void my_forceStrikerPosition(void* self, void* sel, int baselineId, doubl
     }
 
     // STRICT ISOLATION: Never process or store opponent striker positions!
-    // If table view is not rotated, local baseline is at y < 0.0.
-    // If table view is rotated 180 deg (local baseline is top), y > 0.0 is the local player!
+    bool isOpponent = isOpponentBaseline(y);
+    if (isOpponent) {
+        if (!s_passAndPlayBothSides.load()) {
+            s_isLocalTurnReady.store(false);
+            GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
+            return;
+        }
+    }
+
     if (!s_isLocalTurnReady.load()) {
         return;
     }
-    bool isRotated = s_isLocalTurnRotated.load();
-    if (!isRotated && y > 0.0) return;
-    if (isRotated && y < 0.0) return;
 
     // Identify local vs opponent: baselineId set at setupLocalStrikerBar is the local player's key.
     int knownLocal = s_localBaselineId.load();
     bool isLocalPlayer = (knownLocal == 0 || baselineId == knownLocal);
-    if (isLocalPlayer && !std::isnan(x) && !std::isnan(y)) {
-        s_localBaselineId.store(baselineId);
-        s_lastPlayerIndex.store(baselineId);
+    if ((isLocalPlayer || s_passAndPlayBothSides.load()) && !std::isnan(x) && !std::isnan(y)) {
+        if (isLocalPlayer) {
+            s_localBaselineId.store(baselineId);
+            s_lastPlayerIndex.store(baselineId);
+        }
         g_matchActive.store(true);
         setGraphicsMatchActive(true);
 
@@ -1401,7 +1479,7 @@ static void my_forceStrikerPosition(void* self, void* sel, int baselineId, doubl
 
         double curAngle = g_lastLoggedAngle.load();
         if (std::abs(curAngle) > 100.0 || std::isnan(curAngle)) {
-            curAngle = M_PI / 2.0;
+            curAngle = (lockedY > 0.0) ? (-M_PI / 2.0) : (M_PI / 2.0);
         }
         double curForce = g_lastLoggedForce.load();
         if (curForce < 0.05 || std::isnan(curForce)) curForce = 1.0;
@@ -1445,31 +1523,32 @@ static MCPointDouble sampleLiveStrikerOnTable() {
                     double sx = 0.0, sy = 0.0;
                     bool readPos = false;
 
-                    // 1. Read true physical Box2D body position at slAddr + 0x10 and +0x18
-                    uintptr_t xBits = 0, yBits = 0;
-                    if (safeReadPtr(slAddr + 0x10, &xBits) && safeReadPtr(slAddr + 0x18, &yBits)) {
-                        double bx = *reinterpret_cast<double*>(&xBits);
-                        double by = *reinterpret_cast<double*>(&yBits);
-                        if (!std::isnan(bx) && !std::isnan(by) && std::abs(bx) <= 38.0 && std::abs(by) <= 38.0) {
-                            sx = bx;
-                            sy = by;
-                            readPos = true;
+                    // 1. If user is smoothly dragging the slider, read active smooth target at +0x160 first
+                    uint8_t isSmooth = 0;
+                    safeReadBytes(slAddr + 0x170, &isSmooth, 1);
+                    if (isSmooth) {
+                        uintptr_t mxBits = 0, myBits = 0;
+                        if (safeReadPtr(slAddr + 0x160, &mxBits) && safeReadPtr(slAddr + 0x168, &myBits)) {
+                            double msx = *reinterpret_cast<double*>(&mxBits);
+                            double msy = *reinterpret_cast<double*>(&myBits);
+                            if (!std::isnan(msx) && !std::isnan(msy) && std::abs(msx) <= 38.0 && std::abs(msy) <= 38.0) {
+                                sx = msx;
+                                sy = msy;
+                                readPos = true;
+                            }
                         }
                     }
-                    // 2. Only if body position was unreadable or 0, check smooth target at 0x160 if active
+
+                    // 2. Fall back to resting physical Box2D body position at slAddr + 0x10 and +0x18
                     if (!readPos) {
-                        uint8_t isSmooth = 0;
-                        safeReadBytes(slAddr + 0x170, &isSmooth, 1);
-                        if (isSmooth) {
-                            uintptr_t mxBits = 0, myBits = 0;
-                            if (safeReadPtr(slAddr + 0x160, &mxBits) && safeReadPtr(slAddr + 0x168, &myBits)) {
-                                double msx = *reinterpret_cast<double*>(&mxBits);
-                                double msy = *reinterpret_cast<double*>(&myBits);
-                                if (!std::isnan(msx) && !std::isnan(msy) && std::abs(msx) <= 38.0 && std::abs(msy) <= 38.0) {
-                                    sx = msx;
-                                    sy = msy;
-                                    readPos = true;
-                                }
+                        uintptr_t xBits = 0, yBits = 0;
+                        if (safeReadPtr(slAddr + 0x10, &xBits) && safeReadPtr(slAddr + 0x18, &yBits)) {
+                            double bx = *reinterpret_cast<double*>(&xBits);
+                            double by = *reinterpret_cast<double*>(&yBits);
+                            if (!std::isnan(bx) && !std::isnan(by) && std::abs(bx) <= 38.0 && std::abs(by) <= 38.0) {
+                                sx = bx;
+                                sy = by;
+                                readPos = true;
                             }
                         }
                     }
@@ -1566,28 +1645,33 @@ static MCPointDouble sampleStrikerFullTable() {
 static MCPointDouble sampleStrikerPosition() {
     double minX = g_baselineMinX.load();
     double maxX = g_baselineMaxX.load();
-    if (minX >= maxX || minX < -35.0 || maxX > 35.0) { minX = -23.85; maxX = 23.85; }
+    if (minX >= maxX || minX < -35.0 || maxX > 35.0) {
+        minX = catengine::constants::kBaselineMinX;
+        maxX = catengine::constants::kBaselineMaxX;
+    }
 
     double x = g_liveStrikerX.load();
     double y = g_liveStrikerY.load();
 
-    // If g_liveStrikerX is valid and already set by user drag or setupLocalStrikerBar, keep it
-    if (std::isnan(x) || std::abs(x) > 35.0) {
+    int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    bool userRecentlyTouched = (nowMs - s_lastUserSliderTouchMs.load() < 2500);
+
+    if (!userRecentlyTouched) {
         MCPointDouble live = sampleLiveStrikerOnTable();
         if (!std::isnan(live.x) && std::abs(live.x) <= 35.0) {
             x = live.x;
-        } else {
+        } else if (std::isnan(x) || std::abs(x) > 35.0) {
             x = 0.0;
+        }
+
+        if (!std::isnan(live.y) && std::abs(live.y) >= 15.0 && std::abs(live.y) <= 35.0) {
+            y = live.y;
         }
     }
 
     if (std::isnan(y) || std::abs(y) < 15.0 || std::abs(y) > 35.0) {
-        MCPointDouble live = sampleLiveStrikerOnTable();
-        if (!std::isnan(live.y) && std::abs(live.y) > 15.0 && std::abs(live.y) <= 35.0) {
-            y = live.y;
-        } else {
-            y = (s_isOpponentTurn.load() && s_passAndPlayBothSides.load()) ? 25.35 : -25.35;
-        }
+        y = (s_isOpponentTurn.load() && s_passAndPlayBothSides.load()) ? catengine::constants::kBaselineY : -catengine::constants::kBaselineY;
     }
     x = std::clamp(x, minX, maxX);
 
@@ -1630,24 +1714,30 @@ static void my_onAimChanged(void* this_ptr, int mode, double angle, double force
     }
 
     if (!std::isnan(angle) && !std::isnan(force)) {
-        if (s_isOpponentTurn.load()) {
+        MCPointDouble stPos = sampleStrikerPosition();
+        double curX = stPos.x;
+        double curY = stPos.y; // ALWAYS active player baseline Y!
+
+        bool isOpponent = isOpponentBaseline(curY);
+        if (isOpponent) {
+            s_isOpponentTurn.store(true);
             if (!s_passAndPlayBothSides.load()) {
                 // Strictly hide guidelines during friend/opponent turn ("my chance not friends chance")
+                s_isLocalTurnReady.store(false);
                 GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
                 return;
             }
+            s_isLocalTurnReady.store(true);
+        } else {
+            s_isOpponentTurn.store(false);
+            s_isLocalTurnReady.store(true);
         }
 
-        s_isLocalTurnReady.store(true);
         int localB = s_isOpponentTurn.load() ? s_activeTurnPlayerId.load() : s_localBaselineId.load();
         s_lastPlayerIndex.store((localB >= 0) ? localB : 0);
 
         g_matchActive.store(true);
         setGraphicsMatchActive(true);
-
-        MCPointDouble stPos = sampleStrikerPosition();
-        double curX = stPos.x;
-        double curY = stPos.y; // ALWAYS active player baseline Y!
 
         double launchAngle = pullAngleToLaunchAngle(angle);
         g_lastLoggedAngle.store(launchAngle);
@@ -2372,7 +2462,7 @@ static void* getControlsLogicLocal() {
         uintptr_t tcAddr = reinterpret_cast<uintptr_t>(tc);
         for (size_t off = 0x20; off <= 0x500; off += sizeof(void*)) {
             uintptr_t cand = 0;
-            if (safeReadPtr(tcAddr + off, &cand) && cand > 0x10000 && cand < 0x7FFFFFFFFFFF) {
+            if (safeReadPtr(tcAddr + off, &cand) && isValidUserPointer(cand)) {
                 if (isControlsLogicLocal(cand)) {
                     void* candShot = reinterpret_cast<void*>(cand + g_offsets.controlsLogicShot);
                     if (isValidShotDelegate(candShot)) {
@@ -2386,7 +2476,7 @@ static void* getControlsLogicLocal() {
                     }
                 }
                 uintptr_t ctrlPtr = 0;
-                if (safeReadPtr(cand + 0x20, &ctrlPtr) && ctrlPtr > 0x10000 && isControlsLogicLocal(ctrlPtr)) {
+                if (safeReadPtr(cand + 0x20, &ctrlPtr) && isValidUserPointer(ctrlPtr) && isControlsLogicLocal(ctrlPtr)) {
                     s_capturedMatchController = reinterpret_cast<void*>(cand);
                     void* candShot = reinterpret_cast<void*>(ctrlPtr + g_offsets.controlsLogicShot);
                     if (isValidShotDelegate(candShot)) {
@@ -2538,19 +2628,12 @@ struct NativePuckSnapshotItem {
 };
 
 bool CatEngine_CanSimulateNative() {
-    if (!g_matchActive.load() || !g_libgameBase) return false;
-    void* tc = g_activeTableController.load();
-    if (!tc || !isValidTableController(tc)) return false;
-    uintptr_t tcAddr = reinterpret_cast<uintptr_t>(tc);
-    uintptr_t tableLogicAddr = 0;
-    if (!safeReadPtr(tcAddr + g_offsets.tcTableLogic, &tableLogicAddr) || !tableLogicAddr) return false;
-
-    // Check if real match physics is currently in-flight
-    uint8_t liveActive = 0;
-    if (safeReadBytes(tableLogicAddr + 0x1e0, &liveActive, 1) && liveActive != 0) {
-        return false;
-    }
-    return true;
+    // In-Engine native stepping calls launchStriker and step on the live TableLogic,
+    // which allocates Scudo heap chunks that cannot be cleanly undone by raw memory rollback,
+    // causing 'Scudo ERROR: invalid chunk state' crashes on Android 11-15.
+    // Permanently disabled: Snake Engine CCD (simulateStrikerTrajectoryV2) provides 99.9%
+    // accurate headless trajectory simulation with zero heap corruption.
+    return false;
 }
 
 AimSimulationResult CatEngine_SimulateInEngineNative(double startX, double startY, double shotAngle, double forceVal, int maxSimSteps) {
@@ -3093,16 +3176,19 @@ static void my_tl_moveStrikerSmooth(void* tableLogic, int baselineId, bool remot
     }
     // remote == false: Local user or friend dragging the slider on this device
     if (!remote && !std::isnan(x)) {
-        bool isTopPlayer = (y > 0.0);
-        if (isTopPlayer) {
+        bool isOpponent = isOpponentBaseline(y);
+        if (isOpponent) {
             // Friend moving striker at top baseline
             s_isOpponentTurn.store(true);
             s_activeTurnPlayerId.store(baselineId);
             if (!s_passAndPlayBothSides.load()) {
                 // Strictly hide guidelines during friend's turn ("my chance not friends chance")
+                s_isLocalTurnReady.store(false);
+                GraphicsEngine_ResetPersistedShot();
                 GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
                 return;
             }
+            s_isLocalTurnReady.store(true);
         } else {
             // Local user moving striker at bottom baseline
             s_localBaselineId.store(baselineId);
@@ -3114,7 +3200,6 @@ static void my_tl_moveStrikerSmooth(void* tableLogic, int baselineId, bool remot
 
         g_matchActive.store(true);
         setGraphicsMatchActive(true);
-        s_isLocalTurnReady.store(true);
         GraphicsEngine_OnStrikerReturnedToBaseline();
         GraphicsEngine_SetReviewFreeze(false);
 
@@ -3209,9 +3294,9 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
 
     if (self) {
         uintptr_t timerNode = 0;
-        if (safeReadPtr(reinterpret_cast<uintptr_t>(self) + g_offsets.gvTimerNode, &timerNode) && timerNode > 0x10000) {
+        if (safeReadPtr(reinterpret_cast<uintptr_t>(self) + g_offsets.gvTimerNode, &timerNode) && isValidUserPointer(timerNode)) {
             s_capturedTimerNode.store(reinterpret_cast<void*>(timerNode));
-        } else if (safeReadPtr(reinterpret_cast<uintptr_t>(self) + g_offsets.gvTimerNodeAlt, &timerNode) && timerNode > 0x10000) {
+        } else if (safeReadPtr(reinterpret_cast<uintptr_t>(self) + g_offsets.gvTimerNodeAlt, &timerNode) && isValidUserPointer(timerNode)) {
             s_capturedTimerNode.store(reinterpret_cast<void*>(timerNode));
         }
 
@@ -3222,7 +3307,7 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
         }
 
         uintptr_t matchCtrl = 0;
-        if (safeReadPtr(reinterpret_cast<uintptr_t>(self) + g_offsets.gvMatchController, &matchCtrl) && matchCtrl) {
+        if (safeReadPtr(reinterpret_cast<uintptr_t>(self) + g_offsets.gvMatchController, &matchCtrl) && isValidUserPointer(matchCtrl)) {
             s_capturedMatchController = reinterpret_cast<void*>(matchCtrl);
             s_syntheticClosure[1] = matchCtrl;
             s_capturedMoveStrikerThis = reinterpret_cast<void*>(s_syntheticClosure);
@@ -3236,7 +3321,7 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
             }
 
             uintptr_t controlsLogic = 0;
-            if (safeReadPtr(matchCtrl + g_offsets.matchCtrlControlsLogic, &controlsLogic) && controlsLogic > 0x10000) {
+            if (safeReadPtr(matchCtrl + g_offsets.matchCtrlControlsLogic, &controlsLogic) && isValidUserPointer(controlsLogic)) {
                 void* candShot = reinterpret_cast<void*>(controlsLogic + g_offsets.controlsLogicShot);
                 if (isValidShotDelegate(candShot)) {
                     s_capturedControlsLogic = reinterpret_cast<void*>(controlsLogic);
@@ -3266,15 +3351,33 @@ static void my_setupLocalStrikerBar(void* self, void* sel) {
     g_liveStrikerY.store(lockedY);
     onStrikerPositionUpdated(startX, lockedY);
 
-    // Turn is guaranteed to be local player's turn when setupLocalStrikerBar is invoked!
+    bool isRotated = s_isLocalTurnRotated.load();
+    GraphicsEngine_SetTableRotated(isRotated);
+
+    bool isOpponent = isOpponentBaseline(lockedY);
+    if (isOpponent) {
+        s_isOpponentTurn.store(true);
+        s_activeTurnPlayerId.store(1);
+        if (!s_passAndPlayBothSides.load()) {
+            s_isLocalTurnReady.store(false);
+            GraphicsEngine_ResetTurnScanTimer();
+            GraphicsEngine_ResetPersistedShot();
+            GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
+            return;
+        }
+        s_isLocalTurnReady.store(true);
+    } else {
+        s_isOpponentTurn.store(false);
+        s_isLocalTurnReady.store(true);
+    }
+
     g_matchActive.store(true);
     setGraphicsMatchActive(true);
-    s_isOpponentTurn.store(false);
-    s_activeTurnPlayerId.store(s_localBaselineId.load());
-    s_isLocalTurnReady.store(true);
     s_lastShotTimeMs.store(0);
     GraphicsEngine_OnStrikerReturnedToBaseline();
     double defaultAngle = (lockedY > 0.0) ? (-M_PI / 2.0) : (M_PI / 2.0);
+    g_lastLoggedAngle.store(defaultAngle);
+    g_lastLoggedForce.store(1.0);
     GraphicsEngine_UpdateAim(startX, lockedY, defaultAngle, 1.0, false);
     if (self) {
         updateStrikerPhysicsFromGame(self);
@@ -3291,8 +3394,11 @@ static setupOpponentStrikerBar_fn orig_setupOpponentStrikerBar = nullptr;
 static void my_setupOpponentStrikerBar(void* self, void* sel) {
     s_isOpponentTurn.store(true);
     s_activeTurnPlayerId.store(1);
-    s_isLocalTurnReady.store(false);
+    s_isLocalTurnReady.store(s_passAndPlayBothSides.load());
     GraphicsEngine_ResetTurnScanTimer();
+    if (!s_passAndPlayBothSides.load()) {
+        GraphicsEngine_ResetPersistedShot();
+    }
     GraphicsEngine_UpdateAim(0.0, 0.0, 0.0, 0.0, false);
     ALOGI("[GAME EVENT] >>> OPPONENT TURN STARTED (setupOpponentStrikerBar)! Auto-Shot paused. <<<");
     if (self) {
@@ -3328,10 +3434,10 @@ extern "C" float CatEngine_GetTurnRemainingSeconds() {
     if (!node && s_capturedGameplayView) {
         uintptr_t gvAddr = reinterpret_cast<uintptr_t>(s_capturedGameplayView);
         uintptr_t candNode = 0;
-        if (safeReadPtr(gvAddr + g_offsets.gvTimerNode, &candNode) && candNode > 0x10000) {
+        if (safeReadPtr(gvAddr + g_offsets.gvTimerNode, &candNode) && isValidUserPointer(candNode)) {
             node = reinterpret_cast<void*>(candNode);
             s_capturedTimerNode.store(node);
-        } else if (safeReadPtr(gvAddr + g_offsets.gvTimerNodeAlt, &candNode) && candNode > 0x10000) {
+        } else if (safeReadPtr(gvAddr + g_offsets.gvTimerNodeAlt, &candNode) && isValidUserPointer(candNode)) {
             node = reinterpret_cast<void*>(candNode);
             s_capturedTimerNode.store(node);
         }

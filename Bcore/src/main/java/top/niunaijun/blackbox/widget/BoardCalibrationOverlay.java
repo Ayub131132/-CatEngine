@@ -277,6 +277,9 @@ public class BoardCalibrationOverlay {
             sContactFriction = sp.getFloat(KEY_CONTACT_FRICTION, 0.050f);
             sCushionTangentFriction = sp.getFloat(KEY_CUSHION_TANGENT, 0.90f);
         }
+
+        boolean passAndPlay = sp.getBoolean("calib_pass_and_play", false);
+        NativeCore.setPassAndPlayBothSides(passAndPlay);
     }
 
     private static void persistCurrentState(Context context,
@@ -910,6 +913,22 @@ public class BoardCalibrationOverlay {
             persistCurrentState(activity, bounds, lineThickness, showLines, pocketRadius, puckRadius, strikerRadius, pocketInset, physics, advPhysics, pocketPhys);
         });
         contentLayout.addView(cbShowBorder);
+
+        // Pass & Play Both Sides Toggle CheckBox
+        CheckBox cbPassAndPlay = new CheckBox(activity);
+        cbPassAndPlay.setText("Pass & Play: Show Guidelines on Both Sides (Friend Turn)");
+        cbPassAndPlay.setTextColor(Color.WHITE);
+        cbPassAndPlay.setTypeface(cbPassAndPlay.getTypeface(), android.graphics.Typeface.BOLD);
+        cbPassAndPlay.setShadowLayer(3f, 0f, 1f, Color.BLACK);
+        cbPassAndPlay.setButtonTintList(ColorStateList.valueOf(Color.parseColor("#00E5FF")));
+        cbPassAndPlay.setChecked(NativeCore.getPassAndPlayBothSides());
+        cbPassAndPlay.setPadding(dpToPx(activity, 8), dpToPx(activity, 8), dpToPx(activity, 8), dpToPx(activity, 8));
+        cbPassAndPlay.setOnCheckedChangeListener((btn, isChecked) -> {
+            NativeCore.setPassAndPlayBothSides(isChecked);
+            SharedPreferences sp = activity.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+            sp.edit().putBoolean("calib_pass_and_play", isChecked).apply();
+        });
+        contentLayout.addView(cbPassAndPlay);
 
 
 

@@ -59,3 +59,5 @@ skills-lock.json
 compile_commands.json
 *.png
 diagnostics/
+
+*.mp4

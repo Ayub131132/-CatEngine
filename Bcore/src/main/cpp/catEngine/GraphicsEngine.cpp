@@ -24,14 +24,14 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-static const float kBoardHalfSize       = 37.0f;
-static const float kBaselineY = -25.35f;
-static const float kOpponentBaselineY = 25.35f;
+static const float kBoardHalfSize = catengine::constants::kBoardHalfSize;
+static const float kBaselineY = -catengine::constants::kBaselineY;
+static const float kOpponentBaselineY = catengine::constants::kBaselineY;
 
-static std::atomic<float> s_strikerRadius{2.65f};
-static std::atomic<float> s_puckRadius{1.95f};
-static std::atomic<float> s_pocketRadius{2.65f};
-std::atomic<float> s_pocketInset{33.48f};
+static std::atomic<float> s_strikerRadius{catengine::constants::kStrikerRadius};
+static std::atomic<float> s_puckRadius{catengine::constants::kPuckRadius};
+static std::atomic<float> s_pocketRadius{catengine::constants::kPocketRadius};
+std::atomic<float> s_pocketInset{catengine::constants::kPocketInset};
 static std::atomic<bool> s_hasUserPocketRadius{false};
 static std::atomic<float> s_maxTravelDistance{150.0f};
 static std::atomic<float> s_guidelineThickness{0.45f};
@@ -40,6 +40,7 @@ static std::atomic<bool> s_showPrediction{true};
 static std::atomic<bool> s_showPocket{true};
 static std::atomic<bool> s_showBaselineGuides{false};
 static std::atomic<bool> s_passAndPlayBothSides{false};
+static std::atomic<bool> s_isTableRotated{false};
 static std::atomic<float> s_lineTransparency{1.0f};
 static std::atomic<bool> s_keepLineAfterShot{true};
 static std::atomic<double> s_freezeBaselineX{0.0};
@@ -145,7 +146,7 @@ static std::atomic<bool> s_isReviewFrozen(false);
 static std::atomic<double> s_strikerFriction(0.1600);
 static std::atomic<double> s_puckFriction(0.1080);
 static std::atomic<double> s_restitutionBody(1.0000);
-static std::atomic<double> s_pocketDropMaxSpeed(180.0);
+static std::atomic<double> s_pocketDropMaxSpeed(250.0);
 static std::atomic<double> s_pocketGravity(980.0);
 static std::atomic<double> s_restitutionCushion(0.8800);
 static std::atomic<double> s_strikerMass(3.0000);
@@ -164,21 +165,6 @@ static std::mutex s_posMutex;
 static std::mutex s_polyMutex;
 static std::vector<catengine::v2::Point2D> s_cushionPolygon;
 
-void GraphicsEngine_SetCushionPolygon(const double *coords, int pointCount) {
-  if (!coords || pointCount < 3)
-    return;
-  std::lock_guard<std::mutex> lock(s_polyMutex);
-  s_cushionPolygon.clear();
-  s_cushionPolygon.reserve(pointCount);
-  for (int i = 0; i < pointCount; i++) {
-    catengine::v2::Point2D pt;
-    pt.x = coords[i * 2];
-    pt.y = coords[i * 2 + 1];
-    s_cushionPolygon.push_back(pt);
-  }
-  ALOGI("[CatEngine] Cushion polygon updated with %d vertices from TableLogic!",
-        pointCount);
-}
 static double s_strikerX = 0.0;
 static double s_strikerY = kBaselineY;
 static bool s_hasValidStriker = true;
@@ -211,6 +197,13 @@ struct TablePuckEntry {
 };
 static std::mutex s_puckMutex;
 static std::vector<TablePuckEntry> s_puckList;
+static std::atomic<uint64_t> s_puckVersion{0};
+
+static void clearPucks() {
+  std::lock_guard<std::mutex> lock(s_puckMutex);
+  s_puckList.clear();
+  s_puckVersion.fetch_add(1);
+}
 
 // TrajectorySegment, PuckTrajectoryInfo, AimSimulationResult are defined in
 // GraphicsEngine.h
@@ -393,14 +386,21 @@ static void initGLES() {
 
 static void buildUniversalTableMatrix(float *m, float screenWidth,
                                       float screenHeight, float centerX,
-                                      float centerY, float scale) {
+                                      float centerY, float scaleX, float scaleY, bool isRotated = false) {
   memset(m, 0, 16 * sizeof(float));
-  m[0] = (2.0f * scale) / screenWidth;
-  m[5] = (2.0f * scale) / screenHeight;
+  float sign = isRotated ? -1.0f : 1.0f;
+  m[0] = sign * (2.0f * scaleX) / screenWidth;
+  m[5] = sign * (2.0f * scaleY) / screenHeight;
   m[10] = -1.0f;
   m[12] = (2.0f * centerX / screenWidth) - 1.0f;
   m[13] = (2.0f * centerY / screenHeight) - 1.0f;
   m[15] = 1.0f;
+}
+
+static void buildUniversalTableMatrix(float *m, float screenWidth,
+                                      float screenHeight, float centerX,
+                                      float centerY, float scale, bool isRotated = false) {
+  buildUniversalTableMatrix(m, screenWidth, screenHeight, centerX, centerY, scale, scale, isRotated);
 }
 
 // Authentic Cocos2d 2D Affine Transform -> OpenGL NDC Projection Matrix
@@ -419,6 +419,13 @@ static void buildNativeAffineTableMatrix(float *m, float screenWidth,
     d *= factor;
     tx *= factor;
     ty *= factor;
+  }
+
+  if (s_isTableRotated.load()) {
+    if (a > 0.0) a = -a;
+    if (d > 0.0) d = -d;
+    b = -b;
+    c = -c;
   }
 
   memset(m, 0, 16 * sizeof(float));
@@ -820,666 +827,6 @@ static inline bool isInsidePocketHole(double x, double y, double inset,
   return false;
 }
 
-static AimSimulationResult
-simulateStrikerTrajectoryUniversal(double startX, double startY,
-                                   double shotAngle, double forceVal,
-                                   int maxSimSteps = 4000) {
-  AimSimulationResult sim;
-
-  const float stRadius = s_strikerRadius.load();
-  const float pkRadius = s_puckRadius.load();
-  const float pkInset = s_pocketInset.load();
-  float pkRad = s_pocketRadius.load();
-
-  double fClamped = std::clamp(forceVal, 0.0, 1.0);
-  double minP = s_minPower.load();
-  double maxP = s_maxPower.load();
-  double bonus = s_strikerBonus.load();
-
-  // Pure linear interpolation matching authentic TableLogic::launchStriker
-  // (libgame.so 0x1B2C3A4):
-  double v0 = minP + fClamped * (maxP - minP);
-  if (fClamped >= 0.999 && bonus > 0.0) {
-    v0 += bonus;
-  }
-  v0 *= s_powerMultiplier.load();
-
-  // Incorporate real-time AI adaptive physics parameters
-  auto learnedAI = catengine::ai::AdaptiveLearningEngine::getInstance()
-                       .getLearnedParameters();
-  if (learnedAI.totalShotsLearned > 0) {
-    v0 *= learnedAI.forceScaleFactor;
-    if (learnedAI.pocketCaptureRadius > pkRad) {
-      pkRad = learnedAI.pocketCaptureRadius;
-    }
-  }
-
-  // 2. Setup bodies
-  std::vector<PhysBody> bodies;
-  bodies.reserve(20);
-
-  // Body 0: Striker
-  PhysBody striker;
-  striker.id = -1;
-  striker.puckType = 0;
-  striker.px = startX;
-  striker.py = startY;
-  striker.vx = v0 * std::cos(shotAngle);
-  striker.vy = v0 * std::sin(shotAngle);
-  striker.mass = s_strikerMass.load();
-  striker.radius = stRadius;
-  striker.chainLevel = 0;
-  striker.initX = startX;
-  striker.initY = startY;
-  striker.segStartX = startX;
-  striker.segStartY = startY;
-  double stSpd = std::hypot(striker.vx, striker.vy);
-  striker.lastDirX = (stSpd > 1e-4) ? (striker.vx / stSpd) : 0.0;
-  striker.lastDirY = (stSpd > 1e-4) ? (striker.vy / stSpd) : 0.0;
-  bodies.push_back(striker);
-
-  {
-    std::lock_guard<std::mutex> lock(s_puckMutex);
-    for (const auto &pe : s_puckList) {
-      if (!pe.active)
-        continue;
-      if (isPuckPottedOrInvalid(pe.x, pe.y, pkInset, pkRad))
-        continue;
-
-      PhysBody pb;
-      pb.id = pe.id;
-      pb.puckType = pe.puckType;
-      pb.px = pe.x;
-      pb.py = pe.y;
-      pb.vx = 0.0;
-      pb.vy = 0.0;
-      pb.mass = s_puckMass.load();
-      pb.radius = pkRadius;
-      pb.chainLevel = -1;
-      pb.initX = pe.x;
-      pb.initY = pe.y;
-      pb.segStartX = pe.x;
-      pb.segStartY = pe.y;
-      bodies.push_back(pb);
-    }
-  }
-
-  const double dt = 0.001; // Authentic 1000 Hz CCD step (libgame.so 0x12ea830)
-  const double gDecel = 980.0;
-  const double e_body = s_restitutionBody.load();
-  double e_cush = std::clamp(s_restitutionCushion.load(), 0.05, 0.99);
-  if (learnedAI.totalShotsLearned > 0) {
-    e_cush = std::clamp(static_cast<double>(learnedAI.cushionRestitution), 0.05,
-                        0.99);
-  }
-
-  const double pocketCenters[4][2] = {{pkInset, pkInset},
-                                      {-pkInset, pkInset},
-                                      {pkInset, -pkInset},
-                                      {-pkInset, -pkInset}};
-
-  for (int step = 0; step < maxSimSteps; step++) {
-    bool anyMotion = false;
-    for (const auto &b : bodies) {
-      if (!b.inPocket && std::hypot(b.vx, b.vy) > 0.15) {
-        anyMotion = true;
-        break;
-      }
-    }
-    if (!anyMotion)
-      break;
-
-    double timeLeft = dt;
-    int subStep = 0;
-    const int maxSubSteps = 4; // allow up to 4 micro-events per dt tick
-
-    while (timeLeft > 1e-6 && subStep < maxSubSteps) {
-      subStep++;
-
-      // 1. Continuous Collision Detection (CCD):
-      // Find earliest collision time across all disc pairs and cushion edges
-      double earliestT = timeLeft;
-      int eventType =
-          0; // 0 = none, 1 = disc-disc edge contact, 2 = cushion edge contact
-      size_t eventI = 0, eventJ = 0;
-      int cushionWall = 0; // 1 = Right, 2 = Left, 3 = Top, 4 = Bottom
-
-      // A. Check disc-to-disc edge-to-edge contact (Analytic TOI Quadratic)
-      for (size_t i = 0; i < bodies.size(); i++) {
-        const auto &bi = bodies[i];
-        if (bi.inPocket)
-          continue;
-
-        for (size_t j = i + 1; j < bodies.size(); j++) {
-          const auto &bj = bodies[j];
-          if (bj.inPocket)
-            continue;
-
-          // If neither body is moving, skip
-          if (std::hypot(bi.vx, bi.vy) <= 0.15 &&
-              std::hypot(bj.vx, bj.vy) <= 0.15)
-            continue;
-
-          double rSum = bi.radius + bj.radius;
-          double rx = bj.px - bi.px;
-          double ry = bj.py - bi.py;
-          double rSq = rx * rx + ry * ry;
-
-          // Relative velocity: V_j - V_i
-          double vx = bj.vx - bi.vx;
-          double vy = bj.vy - bi.vy;
-
-          // Contact equation: ||r + v * t||^2 = rSum^2
-          // A*t^2 + 2*B*t + C = 0
-          double A = vx * vx + vy * vy;
-          double B = rx * vx + ry * vy; // dot(r, v)
-          double C = rSq - (rSum * rSum);
-
-          if (C <= 0.0) {
-            // Already touching or overlapping
-            if (B < -1e-6) {
-              // Approaching each other
-              if (0.0 < earliestT) {
-                earliestT = 0.0;
-                eventType = 1;
-                eventI = i;
-                eventJ = j;
-              }
-            }
-          } else if (B < -1e-6 && A > 1e-8) {
-            // Moving towards each other
-            double disc = B * B - A * C;
-            if (disc >= 0.0) {
-              double tHit = (-B - std::sqrt(disc)) / A;
-              if (tHit >= 0.0 && tHit < earliestT) {
-                earliestT = tHit;
-                eventType = 1;
-                eventI = i;
-                eventJ = j;
-              }
-            }
-          }
-        }
-      }
-
-      // B. Check cushion edge contact (CCD) - authentic table boundary
-      for (size_t i = 0; i < bodies.size(); i++) {
-        const auto &b = bodies[i];
-        if (b.inPocket)
-          continue;
-        if (std::hypot(b.vx, b.vy) <= 0.15)
-          continue;
-
-        double boundLimit = kBoardHalfSize - b.radius;
-
-        // Authentic pocket jaw cutoff: cushion only exists between pocket
-        // openings
-        const double pocketJawCutoff = 32.80;
-
-        // Right cushion (x = +boundLimit)
-        if (b.vx > 1e-4) {
-          double tc = (b.px >= boundLimit) ? 0.0 : ((boundLimit - b.px) / b.vx);
-          if (tc >= 0.0 && tc < earliestT) {
-            double yc = b.py + b.vy * tc;
-            if (std::abs(yc) <= pocketJawCutoff) {
-              earliestT = tc;
-              eventType = 2;
-              eventI = i;
-              cushionWall = 1; // Right
-            }
-          }
-        } else if (b.vx < -1e-4) {
-          // Left cushion (x = -boundLimit)
-          double tc =
-              (b.px <= -boundLimit) ? 0.0 : ((-boundLimit - b.px) / b.vx);
-          if (tc >= 0.0 && tc < earliestT) {
-            double yc = b.py + b.vy * tc;
-            if (std::abs(yc) <= pocketJawCutoff) {
-              earliestT = tc;
-              eventType = 2;
-              eventI = i;
-              cushionWall = 2; // Left
-            }
-          }
-        }
-
-        // Top cushion (y = +boundLimit)
-        if (b.vy > 1e-4) {
-          double tc = (b.py >= boundLimit) ? 0.0 : ((boundLimit - b.py) / b.vy);
-          if (tc >= 0.0 && tc < earliestT) {
-            double xc = b.px + b.vx * tc;
-            if (std::abs(xc) <= pocketJawCutoff) {
-              earliestT = tc;
-              eventType = 2;
-              eventI = i;
-              cushionWall = 3; // Top
-            }
-          }
-        } else if (b.vy < -1e-4) {
-          // Bottom cushion (y = -boundLimit)
-          double tc =
-              (b.py <= -boundLimit) ? 0.0 : ((-boundLimit - b.py) / b.vy);
-          if (tc >= 0.0 && tc < earliestT) {
-            double xc = b.px + b.vx * tc;
-            if (std::abs(xc) <= pocketJawCutoff) {
-              earliestT = tc;
-              eventType = 2;
-              eventI = i;
-              cushionWall = 4; // Bottom
-            }
-          }
-        }
-      }
-
-      // 2. Advance all moving bodies to earliestT
-      double advanceDt = earliestT;
-      if (advanceDt > 1e-8) {
-        // Advance positions first with exact velocities
-        for (auto &b : bodies) {
-          if (b.inPocket)
-            continue;
-          double spd = std::hypot(b.vx, b.vy);
-          if (spd > 0.15) {
-            b.px += b.vx * advanceDt;
-            b.py += b.vy * advanceDt;
-            b.distTraveled += spd * advanceDt;
-            double boundLimit = kBoardHalfSize - b.radius;
-            b.px = std::clamp(b.px, -boundLimit, boundLimit);
-            b.py = std::clamp(b.py, -boundLimit, boundLimit);
-
-            // Check corner pocket capture (strictly within physical pocket hole entrance <= 1.80 cm)
-            for (int p = 0; p < 4; p++) {
-              double dP = std::hypot(b.px - pocketCenters[p][0],
-                                     b.py - pocketCenters[p][1]);
-              if (dP <= std::min(pkRad, 1.80f)) {
-                b.inPocket = true;
-                b.pocketIndex = p;
-                b.pocketCenterX = pocketCenters[p][0];
-                b.pocketCenterY = pocketCenters[p][1];
-                b.vx = 0.0;
-                b.vy = 0.0;
-
-                TrajectorySegment seg;
-                seg.startX = static_cast<float>(b.segStartX);
-                seg.startY = static_cast<float>(b.segStartY);
-                seg.endX = static_cast<float>(b.px);
-                seg.endY = static_cast<float>(b.py);
-                seg.isCushionBounce = (b.segments.size() > 0);
-                seg.isPuckHit = false;
-                b.segments.push_back(seg);
-                b.segStartX = b.px;
-                b.segStartY = b.py;
-                break;
-              }
-            }
-          }
-        }
-
-        // Ground Coulomb friction deceleration: a = mu * 980.0
-        for (auto &b : bodies) {
-          if (b.inPocket)
-            continue;
-          double curSpd = std::hypot(b.vx, b.vy);
-          if (curSpd > 0.15) {
-            double muTable =
-                (b.id == -1) ? s_strikerFriction.load() : s_puckFriction.load();
-            if (learnedAI.totalShotsLearned > 0) {
-              muTable = (b.id == -1) ? (learnedAI.tableFriction * 1.48)
-                                     : learnedAI.tableFriction;
-            }
-            if (muTable < 0.0001)
-              muTable = 0.0001;
-            double dv = muTable * gDecel * advanceDt;
-            if (curSpd <= dv) {
-              b.vx = 0.0;
-              b.vy = 0.0;
-              b.wx = 0.0;
-              b.wy = 0.0;
-            } else {
-              double scale = (curSpd - dv) / curSpd;
-              b.vx *= scale;
-              b.vy *= scale;
-              b.wx = b.vy / b.radius;
-              b.wy = -b.vx / b.radius;
-            }
-          } else {
-            b.vx = 0.0;
-            b.vy = 0.0;
-            b.wx = 0.0;
-            b.wy = 0.0;
-          }
-        }
-      }
-
-      timeLeft -= advanceDt;
-
-      // 3. Resolve collision at exact edge contact point
-      if (eventType == 1) {
-        auto &bi = bodies[eventI];
-        auto &bj = bodies[eventJ];
-        if (!bi.inPocket && !bj.inPocket) {
-          double cdx = bj.px - bi.px;
-          double cdy = bj.py - bi.py;
-          double dist = std::hypot(cdx, cdy);
-          double minDist = bi.radius + bj.radius;
-          if (dist < 1e-6) {
-            cdx = 1.0;
-            cdy = 0.0;
-            dist = 1e-6;
-          }
-
-          double nx = cdx / dist;
-          double ny = cdy / dist;
-
-          double wi = 1.0 / bi.mass;
-          double wj = 1.0 / bj.mass;
-          double wSum = wi + wj;
-
-          // Separation to guarantee zero overlap and prevent numeric sticking
-          if (dist < minDist) {
-            double overlap = minDist - dist;
-            bi.px -= nx * (overlap + 1e-4) * (wi / wSum);
-            bi.py -= ny * (overlap + 1e-4) * (wi / wSum);
-            bj.px += nx * (overlap + 1e-4) * (wj / wSum);
-            bj.py += ny * (overlap + 1e-4) * (wj / wSum);
-          }
-
-          double relVx = bi.vx - bj.vx;
-          double relVy = bi.vy - bj.vy;
-          double relNorm = relVx * nx + relVy * ny;
-
-          if (relNorm > 0.0) {
-            // Authentic 1D elastic momentum exchange (libgame.so 0x1998840)
-            double tx = -ny;
-            double ty = nx;
-
-            // Project velocities onto collision normal and tangent
-            double v1n = bi.vx * nx + bi.vy * ny;
-            double v1t = bi.vx * tx + bi.vy * ty;
-            double v2n = bj.vx * nx + bj.vy * ny;
-            double v2t = bj.vx * tx + bj.vy * ty;
-
-            double m1 = bi.mass;
-            double m2 = bj.mass;
-            double mSum = m1 + m2;
-
-            // Pure elastic 1D momentum conservation exchange
-            double v1n_new = ((m1 - m2) * v1n + 2.0 * m2 * v2n) / mSum;
-            double v2n_new = (2.0 * m1 * v1n + (m2 - m1) * v2n) / mSum;
-
-            // Tangential velocity is 100% preserved in linear coordinates
-            double v1t_new = v1t;
-            double v2t_new = v2t;
-
-            // Reconstruct post-collision Cartesian velocities
-            bi.vx = v1n_new * nx + v1t_new * tx;
-            bi.vy = v1n_new * ny + v1t_new * ty;
-            bj.vx = v2n_new * nx + v2t_new * tx;
-            bj.vy = v2n_new * ny + v2t_new * ty;
-
-            // Record hit telemetry data
-            bj.isHit = true;
-            bj.hitByEntityId = (bi.id == -1) ? 0 : bi.id;
-            bj.hitSpeed = std::hypot(bj.vx, bj.vy);
-
-            // Authentic spin transfer (libgame.so 0x1998a8c)
-            double v_slip_i = bi.omega * bi.radius - v1t;
-            double Jt_i =
-                std::min(0.40 * std::abs(v1n), std::abs(v_slip_i) / 2.5);
-            double sgnSlip_i =
-                (v_slip_i > 0.0) ? 1.0 : ((v_slip_i < 0.0) ? -1.0 : 0.0);
-            bi.omega += sgnSlip_i * (2.5 * Jt_i / bi.radius);
-
-            double v_slip_j = bj.omega * bj.radius - v2t;
-            double Jt_j =
-                std::min(0.40 * std::abs(v2n), std::abs(v_slip_j) / 2.5);
-            double sgnSlip_j =
-                (v_slip_j > 0.0) ? 1.0 : ((v_slip_j < 0.0) ? -1.0 : 0.0);
-            bj.omega += sgnSlip_j * (2.5 * Jt_j / bj.radius);
-
-            // Collision chain level propagation
-            if (bi.chainLevel >= 0 && bj.chainLevel == -1) {
-              bj.chainLevel = bi.chainLevel + 1;
-              if (bj.segments.empty()) {
-                bj.segStartX = bj.px;
-                bj.segStartY = bj.py;
-              }
-            } else if (bj.chainLevel >= 0 && bi.chainLevel == -1) {
-              bi.chainLevel = bj.chainLevel + 1;
-              if (bi.segments.empty()) {
-                bi.segStartX = bi.px;
-                bi.segStartY = bi.py;
-              }
-            }
-
-            // Striker first impact record (EXACT PERIMETER CONTACT POINT)
-            if (bi.id == -1 && !sim.hasFirstContact) {
-              sim.hasFirstContact = true;
-              sim.firstImpactStrikerX = static_cast<float>(bi.px);
-              sim.firstImpactStrikerY = static_cast<float>(bi.py);
-              sim.firstImpactPuckX = static_cast<float>(bj.px);
-              sim.firstImpactPuckY = static_cast<float>(bj.py);
-              sim.firstContactPuckId = bj.id;
-
-              TrajectorySegment seg;
-              seg.startX = static_cast<float>(bi.segStartX);
-              seg.startY = static_cast<float>(bi.segStartY);
-              seg.endX = static_cast<float>(bi.px);
-              seg.endY = static_cast<float>(bi.py);
-              seg.isCushionBounce = (bi.segments.size() > 0);
-              seg.isPuckHit = true;
-              bi.segments.push_back(seg);
-              bi.segStartX = bi.px;
-              bi.segStartY = bi.py;
-            } else if (bi.id == -1) {
-              // Striker subsequent puck hit
-              TrajectorySegment seg;
-              seg.startX = static_cast<float>(bi.segStartX);
-              seg.startY = static_cast<float>(bi.segStartY);
-              seg.endX = static_cast<float>(bi.px);
-              seg.endY = static_cast<float>(bi.py);
-              seg.isCushionBounce = false;
-              seg.isPuckHit = true;
-              bi.segments.push_back(seg);
-              bi.segStartX = bi.px;
-              bi.segStartY = bi.py;
-            } else if (bi.chainLevel >= 1) {
-              // Puck bi was moving and collided with another body:
-              // Split trajectory at the exact impact point!
-              double distI =
-                  std::hypot(bi.px - bi.segStartX, bi.py - bi.segStartY);
-              if (distI > 0.15) {
-                TrajectorySegment seg;
-                seg.startX = static_cast<float>(bi.segStartX);
-                seg.startY = static_cast<float>(bi.segStartY);
-                seg.endX = static_cast<float>(bi.px);
-                seg.endY = static_cast<float>(bi.py);
-                seg.isCushionBounce = false;
-                seg.isPuckHit = true;
-                bi.segments.push_back(seg);
-                bi.segStartX = bi.px;
-                bi.segStartY = bi.py;
-              }
-            }
-
-            // Symmetrically handle bj if bj was a moving puck hitting another
-            // body: Split trajectory at the exact impact point so deflection
-            // starts from impact point!
-            if (bj.chainLevel >= 1 && bj.id != -1) {
-              double distJ =
-                  std::hypot(bj.px - bj.segStartX, bj.py - bj.segStartY);
-              if (distJ > 0.15) {
-                TrajectorySegment seg;
-                seg.startX = static_cast<float>(bj.segStartX);
-                seg.startY = static_cast<float>(bj.segStartY);
-                seg.endX = static_cast<float>(bj.px);
-                seg.endY = static_cast<float>(bj.py);
-                seg.isCushionBounce = false;
-                seg.isPuckHit = true;
-                bj.segments.push_back(seg);
-                bj.segStartX = bj.px;
-                bj.segStartY = bj.py;
-              }
-            }
-          }
-        }
-      } else if (eventType == 2) {
-        // Cushion bounce with authentic velocity loss & dynamic angle coupling
-        // (libgame.so 0x1998b2c)
-        auto &b = bodies[eventI];
-        if (!b.inPocket) {
-          double boundLimit = kBoardHalfSize - b.radius;
-          double e_eff =
-              e_cush *
-              0.92; // Effective normal restitution (0.78 * 0.92 = 0.7176)
-
-          if (cushionWall == 1) { // Right wall (x = +boundLimit)
-            double vn = b.vx;
-            double vt = -b.vy;
-            // Authentic tangential slip in cushion frame (libgame.so
-            // 0x1998b90): vt - omega * R
-            double v_slip = vt - b.omega * b.radius;
-            double sgnSlip =
-                (v_slip > 0.0) ? 1.0 : ((v_slip < 0.0) ? -1.0 : 0.0);
-            double Jt = std::min(0.40 * std::abs(vn), std::abs(v_slip) / 2.5);
-            double v_prime_n = -vn * e_eff;
-            double v_prime_t = vt - sgnSlip * (Jt / 2.5);
-            b.omega += sgnSlip * (2.5 * Jt / b.radius) - 0.54 * vn / b.radius;
-            b.vx = v_prime_n;
-            b.vy = -v_prime_t *
-                   0.85; // Rubber absorbs 15% tangential sliding energy
-            b.px = boundLimit;
-          } else if (cushionWall == 2) { // Left wall (x = -boundLimit)
-            double vn = -b.vx;
-            double vt = b.vy;
-            double v_slip = vt - b.omega * b.radius;
-            double sgnSlip =
-                (v_slip > 0.0) ? 1.0 : ((v_slip < 0.0) ? -1.0 : 0.0);
-            double Jt = std::min(0.40 * std::abs(vn), std::abs(v_slip) / 2.5);
-            double v_prime_n = -vn * e_eff;
-            double v_prime_t = vt - sgnSlip * (Jt / 2.5);
-            b.omega += sgnSlip * (2.5 * Jt / b.radius) - 0.54 * vn / b.radius;
-            b.vx = -v_prime_n;
-            b.vy = v_prime_t *
-                   0.85; // Rubber absorbs 15% tangential sliding energy
-            b.px = -boundLimit;
-          } else if (cushionWall == 3) { // Top wall (y = +boundLimit)
-            double vn = b.vy;
-            double vt = b.vx;
-            double v_slip = vt - b.omega * b.radius;
-            double sgnSlip =
-                (v_slip > 0.0) ? 1.0 : ((v_slip < 0.0) ? -1.0 : 0.0);
-            double Jt = std::min(0.40 * std::abs(vn), std::abs(v_slip) / 2.5);
-            double v_prime_n = -vn * e_eff;
-            double v_prime_t = vt - sgnSlip * (Jt / 2.5);
-            b.omega += sgnSlip * (2.5 * Jt / b.radius) - 0.54 * vn / b.radius;
-            b.vx = v_prime_t *
-                   0.85; // Rubber absorbs 15% tangential sliding energy
-            b.vy = v_prime_n;
-            b.py = boundLimit;
-          } else if (cushionWall == 4) { // Bottom wall (y = -boundLimit)
-            double vn = -b.vy;
-            double vt = -b.vx;
-            double v_slip = vt - b.omega * b.radius;
-            double sgnSlip =
-                (v_slip > 0.0) ? 1.0 : ((v_slip < 0.0) ? -1.0 : 0.0);
-            double Jt = std::min(0.40 * std::abs(vn), std::abs(v_slip) / 2.5);
-            double v_prime_n = -vn * e_eff;
-            double v_prime_t = vt - sgnSlip * (Jt / 2.5);
-            b.omega += sgnSlip * (2.5 * Jt / b.radius) - 0.54 * vn / b.radius;
-            b.vx = -v_prime_t *
-                   0.85; // Rubber absorbs 15% tangential sliding energy
-            b.vy = -v_prime_n;
-            b.py = -boundLimit;
-          }
-
-          b.wx = b.vx;
-          b.wy = b.vy;
-
-          double dCush = std::hypot(b.px - b.segStartX, b.py - b.segStartY);
-          if (dCush > 0.15) {
-            TrajectorySegment seg;
-            seg.startX = static_cast<float>(
-                std::clamp(b.segStartX, -boundLimit, boundLimit));
-            seg.startY = static_cast<float>(
-                std::clamp(b.segStartY, -boundLimit, boundLimit));
-            seg.endX =
-                static_cast<float>(std::clamp(b.px, -boundLimit, boundLimit));
-            seg.endY =
-                static_cast<float>(std::clamp(b.py, -boundLimit, boundLimit));
-            seg.isCushionBounce = true;
-            seg.isPuckHit = false;
-            b.segments.push_back(seg);
-            b.segStartX = b.px;
-            b.segStartY = b.py;
-          }
-        }
-      } else {
-        // No collision event in remaining time step
-        break;
-      }
-    }
-  }
-
-  for (auto &b : bodies) {
-    if (!b.inPocket) {
-      double boundLimit = kBoardHalfSize - b.radius;
-      double d = std::hypot(b.px - b.segStartX, b.py - b.segStartY);
-      if ((b.segments.empty() && d > 0.50) ||
-          (!b.segments.empty() && d > 0.35)) {
-        TrajectorySegment seg;
-        seg.startX = static_cast<float>(
-            std::clamp(b.segStartX, -boundLimit, boundLimit));
-        seg.startY = static_cast<float>(
-            std::clamp(b.segStartY, -boundLimit, boundLimit));
-        seg.endX =
-            static_cast<float>(std::clamp(b.px, -boundLimit, boundLimit));
-        seg.endY =
-            static_cast<float>(std::clamp(b.py, -boundLimit, boundLimit));
-        seg.isCushionBounce = (b.segments.size() > 0);
-        seg.isPuckHit = false;
-        b.segments.push_back(seg);
-      }
-    }
-  }
-
-  sim.segments = bodies[0].segments;
-  sim.finalStrikerX = static_cast<float>(bodies[0].px);
-  sim.finalStrikerY = static_cast<float>(bodies[0].py);
-  sim.strikerInPocket = bodies[0].inPocket;
-  sim.strikerPocketIndex = bodies[0].pocketIndex;
-  sim.hitPuck = sim.hasFirstContact;
-
-  for (size_t i = 1; i < bodies.size(); i++) {
-    const auto &b = bodies[i];
-    double totalTravel = std::hypot(b.px - b.initX, b.py - b.initY);
-
-    if (b.chainLevel >= 1 &&
-        (totalTravel >= 0.35 || !b.segments.empty() || b.inPocket)) {
-      PuckTrajectoryInfo traj;
-      traj.puckIndex = b.id;
-      traj.puckType = b.puckType;
-      traj.startX = static_cast<float>(b.initX);
-      traj.startY = static_cast<float>(b.initY);
-      traj.finalX = static_cast<float>(b.px);
-      traj.finalY = static_cast<float>(b.py);
-      traj.inPocket = b.inPocket;
-      traj.pocketIndex = b.pocketIndex;
-      traj.pocketCenterX = static_cast<float>(b.pocketCenterX);
-      traj.pocketCenterY = static_cast<float>(b.pocketCenterY);
-      traj.segments = b.segments;
-      traj.hasDeflection = false;
-      traj.hitSpeed = static_cast<float>(b.hitSpeed);
-      traj.hitByEntityId = b.hitByEntityId;
-      traj.isHit = b.isHit;
-      sim.puckTrajectories.push_back(traj);
-    }
-  }
-
-  return sim;
-}
-
-#define USE_PHYSICS_ENGINE_V2 1
 
 static AimSimulationResult
 simulateStrikerTrajectoryV2(double startX, double startY, double shotAngle,
@@ -1531,9 +878,9 @@ simulateStrikerTrajectoryV2(double startX, double startY, double shotAngle,
     cfg.strikerFriction = learnedAI.tableFriction * massFricRatio;
     cfg.puckFriction = learnedAI.tableFriction;
     cfg.restitutionCushion = learnedAI.cushionRestitution;
-    if (learnedAI.pocketCaptureRadius > cfg.pocketRadius) {
-      cfg.pocketRadius = learnedAI.pocketCaptureRadius;
-    }
+    // Note: Do NOT override cfg.pocketRadius with learnedAI.pocketCaptureRadius (2.65f),
+    // because that artificially blows up the pocket hole beyond physical 2.15cm and
+    // produces false "potted" predictions that rim out in the actual game!
   }
 
   {
@@ -1621,7 +968,7 @@ simulateStrikerTrajectoryV2(double startX, double startY, double shotAngle,
 }
 
 static std::atomic<int> s_physicsEngineMode(
-    1); // 1 = In-Engine Native Stepper (Default: 99.99% Exact Miniclip Parity), 0 = Snake Engine CCD
+    0); // 0 = Snake Engine CCD (Continuous Collision Detection, 100% crash-safe), 1 = In-Engine Native Stepper
 
 void GraphicsEngine_SetPhysicsEngineMode(int mode) {
   s_physicsEngineMode.store(mode);
@@ -1640,6 +987,15 @@ bool GraphicsEngine_GetPassAndPlayBothSides() {
   return s_passAndPlayBothSides.load();
 }
 
+void GraphicsEngine_SetTableRotated(bool isRotated) {
+  s_isTableRotated.store(isRotated);
+  ALOGI("[CatEngine] Table Rotation updated to: %s", (isRotated ? "180 DEG ROTATED" : "STANDARD"));
+}
+
+bool GraphicsEngine_IsTableRotated() {
+  return s_isTableRotated.load();
+}
+
 static inline AimSimulationResult
 simulateStrikerTrajectory(double startX, double startY, double shotAngle,
                           double forceVal, int maxSimSteps = 5000) {
@@ -1651,16 +1007,692 @@ simulateStrikerTrajectory(double startX, double startY, double shotAngle,
       return nativeRes;
     }
   }
-#if USE_PHYSICS_ENGINE_V2
   return simulateStrikerTrajectoryV2(startX, startY, shotAngle, forceVal,
                                      maxSimSteps);
-#else
-  return simulateStrikerTrajectoryUniversal(startX, startY, shotAngle, forceVal,
-                                            maxSimSteps);
-#endif
 }
 
+// =========================================================================================
+// HIGH-SPEED GHOST-BALL CANDIDATE SEARCH & SHOT GUIDANCE ENGINE
+// =========================================================================================
+static std::mutex s_guideMutex;
+static CandidateShot s_recommendedShot;
+static AimSimulationResult s_recommendedSim;
+static std::atomic<bool> s_hasRecommendedShot{false};
+static std::atomic<int64_t> s_lastGuideEvalMs{0};
+
+static inline double distSqToSegment(double px, double py, double ax, double ay,
+                                     double bx, double by) {
+  double abx = bx - ax;
+  double aby = by - ay;
+  double apx = px - ax;
+  double apy = py - ay;
+  double abLenSq = abx * abx + aby * aby;
+  if (abLenSq < 1e-6) {
+    return apx * apx + apy * apy;
+  }
+  double t = std::clamp((apx * abx + apy * aby) / abLenSq, 0.0, 1.0);
+  double closestX = ax + t * abx;
+  double closestY = ay + t * aby;
+  double dx = px - closestX;
+  double dy = py - closestY;
+  return dx * dx + dy * dy;
+}
+
+static bool evaluateCandidateShot(const AimSimulationResult &sim, float candX,
+                                  float candY, double angleRad, double forceVal,
+                                  CandidateShot *outCand,
+                                  bool allowBankShots = false) {
+  if (!outCand)
+    return false;
+
+  float pkInset = s_pocketInset.load();
+  float pkRad = s_pocketRadius.load();
+
+  // Scratch foul: Striker enters pocket
+  if (sim.strikerInPocket ||
+      isInsidePocketHole(sim.finalStrikerX, sim.finalStrikerY, pkInset,
+                         pkRad)) {
+    return false;
+  }
+
+  if (!sim.hasFirstContact || sim.puckTrajectories.empty()) {
+    return false;
+  }
+
+  // Check if striker bounced before hitting puck
+  bool strikerHadBounce = false;
+  for (const auto &seg : sim.segments) {
+    if (seg.isCushionBounce) {
+      strikerHadBounce = true;
+      break;
+    }
+    if (seg.isPuckHit)
+      break;
+  }
+  if (strikerHadBounce) {
+    return false;
+  }
+
+  int secondaryPuckHits = 0;
+  for (const auto &traj : sim.puckTrajectories) {
+    if (traj.puckIndex != sim.firstContactPuckId) {
+      double dMoved =
+          std::hypot(traj.finalX - traj.startX, traj.finalY - traj.startY);
+      if (traj.isHit && (traj.hitSpeed > 2.0 || dMoved > 0.35)) {
+        secondaryPuckHits++;
+      }
+    }
+  }
+
+  for (const auto &traj : sim.puckTrajectories) {
+    if (!traj.inPocket)
+      continue;
+
+    int mode = s_targetColorMode.load();
+    if (mode == 0) {
+      mode = s_autoDetectedColor.load();
+    }
+    bool isPuckAllowed = false;
+    if (traj.puckType == 3) {
+      isPuckAllowed = true;
+    } else if (mode == 1) {
+      isPuckAllowed = (traj.puckType == 1);
+    } else if (mode == 2) {
+      isPuckAllowed = (traj.puckType == 2);
+    } else if (mode == 3) {
+      isPuckAllowed = true;
+    } else {
+      isPuckAllowed = (traj.puckType == 1 || traj.puckType == 2);
+    }
+
+    if (!isPuckAllowed) {
+      continue;
+    }
+
+    int puckCushBounces = 0;
+    for (const auto &seg : traj.segments) {
+      if (seg.isCushionBounce)
+        puckCushBounces++;
+    }
+
+    int tier = 99;
+    if (traj.puckIndex == sim.firstContactPuckId && puckCushBounces == 0) {
+      tier = (secondaryPuckHits == 0) ? 1 : 2;
+    } else if (traj.puckIndex == sim.firstContactPuckId &&
+               (puckCushBounces == 1 || puckCushBounces == 2)) {
+      tier = (secondaryPuckHits == 0) ? 2 : 3;
+    } else if (traj.puckIndex != sim.firstContactPuckId) {
+      tier = 3;
+    }
+
+    if (tier > 3) {
+      continue;
+    }
+
+    double dStriker = std::hypot(sim.firstImpactStrikerX - candX,
+                                 sim.firstImpactStrikerY - candY);
+    double dPuck = std::hypot(traj.finalX - sim.firstImpactPuckX,
+                              traj.finalY - sim.firstImpactPuckY);
+    double totalPathLength = dStriker + dPuck;
+
+    double aimAngle =
+        std::atan2(sim.firstImpactPuckY - candY, sim.firstImpactPuckX - candX);
+    double potAngle = std::atan2(traj.finalY - sim.firstImpactPuckY,
+                                 traj.finalX - sim.firstImpactPuckX);
+    double cutAngle = std::abs(potAngle - aimAngle);
+    while (cutAngle > M_PI)
+      cutAngle = std::abs(cutAngle - 2.0 * M_PI);
+    double cutDeg = cutAngle * 180.0 / M_PI;
+
+    if (tier == 1 && cutDeg > 75.0)
+      continue;
+    if (tier == 2 && cutDeg > 65.0)
+      continue;
+    if (tier == 3 && cutDeg > 60.0)
+      continue;
+
+    double dToPocketCenter = std::hypot(traj.pocketCenterX - traj.finalX,
+                                        traj.pocketCenterY - traj.finalY);
+
+    double risk = 0.0;
+    if (tier == 1)
+      risk += 5.0;
+    else if (tier == 2)
+      risk += (secondaryPuckHits > 0) ? 25.0 : 20.0;
+    else if (tier == 3)
+      risk += (secondaryPuckHits > 1) ? 42.0 : 35.0;
+
+    if (secondaryPuckHits > 0) {
+      risk += std::min(15.0, secondaryPuckHits * 3.5);
+    }
+
+    if (cutDeg > 12.0 && cutDeg <= 40.0) {
+      risk += (cutDeg - 12.0) * 0.40;
+    } else if (cutDeg > 40.0) {
+      risk += 28.0 * 0.40 + (cutDeg - 40.0) * 0.85;
+    }
+
+    if (totalPathLength > 35.0) {
+      risk += (totalPathLength - 35.0) * 0.35;
+    }
+    if (dToPocketCenter < 0.60) {
+      risk -= 8.0;
+    }
+    risk = std::clamp(risk, 1.0, 99.0);
+
+    double baseScore =
+        (tier == 1) ? 200000.0 : ((tier == 2) ? 80000.0 : 40000.0);
+    if (secondaryPuckHits > 0 && tier == 1) {
+      baseScore = 150000.0;
+    }
+    double straightBonus = 0.0;
+    if (tier == 1) {
+      if (cutDeg < 12.0) {
+        straightBonus = 500000.0;
+      } else if (cutDeg < 25.0) {
+        straightBonus = 300000.0;
+      }
+    }
+    double queenBonus = (traj.puckType == 3) ? 15000.0 : 0.0;
+    int targetColor = (mode == 2) ? 2 : 1;
+    double myPuckBonus = (traj.puckType == targetColor) ? 5000.0 : 0.0;
+
+    double centeringBonus = std::max(0.0, (pkRad - dToPocketCenter)) * 40000.0;
+    double finalScore = baseScore + straightBonus + (100.0 - risk) * 250.0 +
+                        centeringBonus + queenBonus + myPuckBonus;
+
+    outCand->candX = candX;
+    outCand->candY = candY;
+    outCand->angleRad = angleRad;
+    double effectiveForce = forceVal;
+    if (tier == 1 && totalPathLength < 45.0) {
+      effectiveForce =
+          std::clamp(0.60 + 0.40 * (totalPathLength / 45.0), 0.65, 1.0);
+    }
+    outCand->forceVal = effectiveForce;
+    outCand->tier = tier;
+    outCand->score = finalScore;
+    outCand->riskScore = risk;
+    outCand->targetPuckId = traj.puckIndex;
+    outCand->targetPuckType = traj.puckType;
+    outCand->potted = true;
+    outCand->pocketId = traj.pocketIndex;
+    outCand->cushionCount = puckCushBounces;
+    outCand->secondaryHits = secondaryPuckHits;
+    outCand->cutAngleDeg = cutDeg;
+    outCand->puckStartX = traj.startX;
+    outCand->puckStartY = traj.startY;
+    outCand->predLandingX = traj.finalX;
+    outCand->predLandingY = traj.finalY;
+    return true;
+  }
+
+  return false;
+}
+
+bool GraphicsEngine_FindBestCandidateShot(CandidateShot *outBestShot, double inCurStX, double inCurStY) {
+  if (!outBestShot) return false;
+
+  double curStX = inCurStX;
+  double curStY = inCurStY;
+  if (std::abs(curStY) < 1.0) {
+    if (!CatEngine_GetLiveStrikerPos(&curStX, &curStY)) {
+      std::lock_guard<std::mutex> lock(s_posMutex);
+      curStX = s_strikerX;
+      curStY = s_strikerY;
+    }
+  }
+  double baselineY = (curStY > 0.0) ? 25.35 : -25.35;
+  bool isTopBaseline = (baselineY > 0.0);
+
+  float minX = s_baselineMinX.load();
+  float maxX = s_baselineMaxX.load();
+  if (minX >= maxX || minX < -35.0f || maxX > 35.0f) {
+    minX = -23.85f;
+    maxX = 23.85f;
+  }
+
+  float pkInset = s_pocketInset.load();
+  float pkRad = s_pocketRadius.load();
+  float stRad = s_strikerRadius.load();
+  float pRad = s_puckRadius.load();
+
+  std::vector<TablePuckEntry> targets;
+  int countQueen = 0, countWhite = 0, countBlack = 0;
+  {
+    std::lock_guard<std::mutex> lock(s_puckMutex);
+    for (const auto &pe : s_puckList) {
+      if (pe.active && !isPuckPottedOrInvalid(pe.x, pe.y, pkInset, pkRad)) {
+        targets.push_back(pe);
+        if (pe.puckType == 3)
+          countQueen++;
+        else if (pe.puckType == 2)
+          countBlack++;
+        else
+          countWhite++;
+      }
+    }
+  }
+
+  if (targets.empty()) {
+    CatEngine_UpdateTablePucks();
+    std::lock_guard<std::mutex> lock(s_puckMutex);
+    for (const auto &pe : s_puckList) {
+      if (pe.active && !isPuckPottedOrInvalid(pe.x, pe.y, pkInset, pkRad)) {
+        targets.push_back(pe);
+        if (pe.puckType == 3)
+          countQueen++;
+        else if (pe.puckType == 2)
+          countBlack++;
+        else
+          countWhite++;
+      }
+    }
+  }
+
+  if (targets.empty()) {
+    return false;
+  }
+
+  int targetMode =
+      s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only, 3=Any/Disc Pool, 4=2v2 Teams
+  int matchPlayers = CatEngine_GetMatchPlayerCount();
+
+  int effectiveColor = targetMode;
+  if (effectiveColor == 0 || effectiveColor == 4) {
+    effectiveColor = s_autoDetectedColor.load();
+  }
+  if (isTopBaseline && s_passAndPlayBothSides.load() && effectiveColor != 0) {
+    // When evaluating candidate shots from the top baseline (friend's turn in Pass & Play),
+    // target the opponent's color!
+    effectiveColor = (effectiveColor == 1) ? 2 : (effectiveColor == 2 ? 1 : effectiveColor);
+  }
+  auto isTargetAllowed = [&](int puckType) -> bool {
+    if (puckType == 3)
+      return true;
+    if (targetMode == 3 || matchPlayers == 3)
+      return true;
+    if (effectiveColor == 1)
+      return (puckType == 1);
+    if (effectiveColor == 2)
+      return (puckType == 2);
+    if (countWhite > 0 && countBlack == 0)
+      return (puckType == 1);
+    if (countBlack > 0 && countWhite == 0)
+      return (puckType == 2);
+    return true;
+  };
+
+  const double pocketCenters[4][2] = {{pkInset, pkInset},
+                                      {-pkInset, pkInset},
+                                      {pkInset, -pkInset},
+                                      {-pkInset, -pkInset}};
+
+  CandidateShot bestTier1;
+  CandidateShot bestTier2;
+  CandidateShot bestTier3;
+  bool hasTier1 = false;
+  bool hasTier2 = false;
+  bool hasTier3 = false;
+  CandidateShot bestShot;
+  bool foundShot = false;
+
+  auto registerCandidate = [&](const CandidateShot &cand) {
+    if (cand.tier == 1) {
+      if (!hasTier1 || cand.score > bestTier1.score) {
+        bestTier1 = cand;
+        hasTier1 = true;
+      }
+    } else if (cand.tier == 2) {
+      if (!hasTier2 || cand.score > bestTier2.score) {
+        bestTier2 = cand;
+        hasTier2 = true;
+      }
+    } else if (cand.tier == 3) {
+      if (!hasTier3 || cand.score > bestTier3.score) {
+        bestTier3 = cand;
+        hasTier3 = true;
+      }
+    }
+  };
+
+  auto isBaselineBlocked = [&](double bx) -> bool {
+    for (const auto &tgt : targets) {
+      double dx = tgt.x - bx;
+      double dy = tgt.y - baselineY;
+      if (std::hypot(dx, dy) < (stRad + pRad + 0.15)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // STEP 1: ULTRA-FAST GHOST-BALL GEOMETRIC TARGETING
+  for (const auto &tgt : targets) {
+    if (!isTargetAllowed(tgt.puckType))
+      continue;
+
+    for (int p = 0; p < 4; p++) {
+      double Px = pocketCenters[p][0];
+      double Py = pocketCenters[p][1];
+
+      double dx = Px - tgt.x;
+      double dy = Py - tgt.y;
+      double dPocket = std::hypot(dx, dy);
+      if (dPocket < 1.0)
+        continue;
+
+      double nx = dx / dPocket;
+      double ny = dy / dPocket;
+
+      double contactDist = stRad + pRad;
+      double S_x = tgt.x - contactDist * nx;
+      double S_y = tgt.y - contactDist * ny;
+
+      double deltaY = S_y - baselineY;
+      if (isTopBaseline && deltaY >= -1.5)
+        continue;
+      if (!isTopBaseline && deltaY <= 1.5)
+        continue;
+
+      bool pocketPathBlocked = false;
+      for (const auto &other : targets) {
+        if (other.id == tgt.id)
+          continue;
+        if (distSqToSegment(other.x, other.y, tgt.x, tgt.y, Px, Py) <
+            (pRad * 1.85) * (pRad * 1.85)) {
+          pocketPathBlocked = true;
+          break;
+        }
+      }
+      if (pocketPathBlocked)
+        continue;
+
+      std::vector<double> candXList;
+      candXList.reserve(6);
+
+      double straightX = 0.0;
+      bool hasStraight = false;
+      if (std::abs(ny) > 0.05) {
+        straightX = S_x - deltaY * (nx / ny);
+        if (straightX >= minX && straightX <= maxX) {
+          candXList.push_back(straightX);
+          hasStraight = true;
+        }
+      }
+
+      if (curStX >= minX && curStX <= maxX) {
+        candXList.push_back(curStX);
+      }
+
+      if (hasStraight) {
+        if (straightX - 3.5 >= minX)
+          candXList.push_back(straightX - 3.5);
+        if (straightX + 3.5 <= maxX)
+          candXList.push_back(straightX + 3.5);
+      } else if (std::abs(ny) > 0.05) {
+        double clampedEdge = std::clamp(straightX, (double)minX, (double)maxX);
+        candXList.push_back(clampedEdge);
+      }
+
+      for (double testX : candXList) {
+        if (isBaselineBlocked(testX))
+          continue;
+
+        bool strikerPathBlocked = false;
+        for (const auto &other : targets) {
+          if (other.id == tgt.id)
+            continue;
+          if (distSqToSegment(other.x, other.y, testX, baselineY, S_x, S_y) <
+              (stRad + pRad - 0.25) * (stRad + pRad - 0.25)) {
+            strikerPathBlocked = true;
+            break;
+          }
+        }
+
+        double aimAngle = std::atan2(S_y - baselineY, S_x - testX);
+        AimSimulationResult sim =
+            simulateStrikerTrajectory(testX, baselineY, aimAngle, 1.0, 1200);
+        CandidateShot cand;
+        if (evaluateCandidateShot(sim, static_cast<float>(testX),
+                                  static_cast<float>(baselineY), aimAngle, 1.0,
+                                  &cand, true)) {
+          registerCandidate(cand);
+          if (s_fastFirstShotMode.load() && cand.potted) {
+            bestShot = cand;
+            foundShot = true;
+            goto select_shot;
+          }
+          if (cand.tier == 1 && cand.cutAngleDeg < 25.0 &&
+              !strikerPathBlocked) {
+            bestShot = cand;
+            foundShot = true;
+            goto select_shot;
+          }
+        }
+      }
+    }
+  }
+
+  if (hasTier1 && bestTier1.cutAngleDeg < 25.0) {
+    goto select_shot;
+  }
+
+  // STEP 2: Targeted direct rays from current striker position
+  for (const auto &tgt : targets) {
+    if (!isTargetAllowed(tgt.puckType))
+      continue;
+
+    double baseAngle = std::atan2(tgt.y - baselineY, tgt.x - curStX);
+    const double deltaAngles[3] = {-0.025, 0.0, 0.025};
+    for (double dAng : deltaAngles) {
+      double rad = baseAngle + dAng;
+      AimSimulationResult sim =
+          simulateStrikerTrajectory(curStX, baselineY, rad, 1.0, 1200);
+      CandidateShot cand;
+      if (evaluateCandidateShot(sim, static_cast<float>(curStX),
+                                static_cast<float>(baselineY), rad, 1.0, &cand,
+                                true)) {
+        registerCandidate(cand);
+        if (s_fastFirstShotMode.load() && cand.potted) {
+          bestShot = cand;
+          foundShot = true;
+          goto select_shot;
+        }
+      }
+    }
+  }
+
+  if (hasTier1 && bestTier1.cutAngleDeg < 30.0) {
+    goto select_shot;
+  }
+
+  // STEP 3: Baseline slide dense search
+  for (float candX = minX; candX <= maxX; candX += 2.0f) {
+    if (isBaselineBlocked(candX))
+      continue;
+    for (const auto &tgt : targets) {
+      if (!isTargetAllowed(tgt.puckType))
+        continue;
+      for (int p = 0; p < 4; p++) {
+        double Px = pocketCenters[p][0];
+        double Py = pocketCenters[p][1];
+        double dx = Px - tgt.x;
+        double dy = Py - tgt.y;
+        double dPocket = std::hypot(dx, dy);
+        if (dPocket < 1.0)
+          continue;
+        double nx = dx / dPocket;
+        double ny = dy / dPocket;
+        double contactDist = stRad + pRad;
+        double S_x = tgt.x - contactDist * nx;
+        double S_y = tgt.y - contactDist * ny;
+        double deltaY = S_y - baselineY;
+        if (isTopBaseline && deltaY >= -1.0)
+          continue;
+        if (!isTopBaseline && deltaY <= 1.0)
+          continue;
+
+        double ax = S_x - candX;
+        double ay = S_y - baselineY;
+        double dApp = std::hypot(ax, ay);
+        if (dApp < 1.0)
+          continue;
+        double dotCut = (ax * nx + ay * ny) / dApp;
+        if (dotCut < 0.35)
+          continue;
+
+        double aimAngle = std::atan2(ay, ax);
+        AimSimulationResult sim =
+            simulateStrikerTrajectory(candX, baselineY, aimAngle, 1.0, 1200);
+        CandidateShot cand;
+        if (evaluateCandidateShot(sim, candX, static_cast<float>(baselineY),
+                                  aimAngle, 1.0, &cand, true)) {
+          registerCandidate(cand);
+          if (s_fastFirstShotMode.load() && cand.potted) {
+            bestShot = cand;
+            foundShot = true;
+            goto select_shot;
+          }
+        }
+      }
+    }
+    if (hasTier1 && bestTier1.score > 400000.0) {
+      break;
+    }
+  }
+
+select_shot:
+  if (!foundShot) {
+    if (hasTier1) {
+      bestShot = bestTier1;
+      foundShot = true;
+    } else if (hasTier2) {
+      bestShot = bestTier2;
+      foundShot = true;
+    } else if (hasTier3) {
+      bestShot = bestTier3;
+      foundShot = true;
+    } else {
+      // Tier 4 Safety Placement
+      float remSec = CatEngine_GetTurnRemainingSeconds();
+      if (remSec <= 6.0f || !targets.empty()) {
+        CandidateShot bestSafety;
+        bool hasSafety = false;
+        double bestSafetyScore = -999999.0;
+
+        for (double candX = minX + 1.5; candX <= maxX - 1.5; candX += 3.5) {
+          for (const auto &tgt : targets) {
+            if (!isTargetAllowed(tgt.puckType))
+              continue;
+
+            double ax = tgt.x - candX;
+            double ay = tgt.y - baselineY;
+            double dApp = std::hypot(ax, ay);
+            if (dApp < 1.0)
+              continue;
+
+            double aimAngle = std::atan2(ay, ax);
+            double safeForce = 0.50;
+
+            AimSimulationResult sim = simulateStrikerTrajectory(
+                candX, baselineY, aimAngle, safeForce, 1500);
+
+            if (sim.strikerInPocket)
+              continue;
+            bool opponentPocketed = false;
+            for (const auto &traj : sim.puckTrajectories) {
+              if (traj.inPocket && !isTargetAllowed(traj.puckType)) {
+                opponentPocketed = true;
+                break;
+              }
+            }
+            if (opponentPocketed)
+              continue;
+
+            double safetyScore = 50000.0 - (dApp * 200.0);
+            if (!hasSafety || safetyScore > bestSafetyScore) {
+              bestSafety.candX = static_cast<float>(candX);
+              bestSafety.candY = static_cast<float>(baselineY);
+              bestSafety.angleRad = aimAngle;
+              bestSafety.forceVal = safeForce;
+              bestSafety.tier = 4;
+              bestSafety.score = safetyScore;
+              bestSafety.targetPuckId = tgt.id;
+              bestSafety.targetPuckType = tgt.puckType;
+              bestSafety.puckStartX = tgt.x;
+              bestSafety.puckStartY = tgt.y;
+              bestSafety.predLandingX = tgt.x + 2.0;
+              bestSafety.predLandingY = tgt.y + 2.0;
+              bestSafety.potted = false;
+              bestSafety.pocketId = -1;
+              bestSafety.cushionCount = 0;
+              bestSafety.secondaryHits = 0;
+              bestSafety.cutAngleDeg = 0.0;
+              bestSafetyScore = safetyScore;
+              hasSafety = true;
+            }
+          }
+        }
+        if (hasSafety) {
+          bestShot = bestSafety;
+          foundShot = true;
+        }
+      }
+    }
+  }
+
+  if (!foundShot) {
+    return false;
+  }
+
+  // 100% Precision Multi-Step Refinement pass
+  if (!s_fastFirstShotMode.load() && bestShot.tier <= 3 && bestShot.potted) {
+    double refinedAngle = bestShot.angleRad;
+    double minPocketDist = 999.0;
+
+    for (double delta = -0.015; delta <= 0.0151; delta += 0.003) {
+      double a = bestShot.angleRad + delta;
+      AimSimulationResult sim = simulateStrikerTrajectory(
+          bestShot.candX, baselineY, a, bestShot.forceVal, 600);
+      CandidateShot cand;
+      if (evaluateCandidateShot(sim, bestShot.candX,
+                                static_cast<float>(baselineY), a,
+                                bestShot.forceVal, &cand, true)) {
+        if (cand.potted && cand.tier <= bestShot.tier) {
+          double dCenter = 999.0;
+          for (const auto &traj : sim.puckTrajectories) {
+            if (traj.inPocket) {
+              dCenter = std::hypot(traj.pocketCenterX - traj.finalX,
+                                   traj.pocketCenterY - traj.finalY);
+              break;
+            }
+          }
+          if (dCenter < minPocketDist) {
+            minPocketDist = dCenter;
+            refinedAngle = a;
+          }
+        }
+      }
+    }
+    bestShot.angleRad = refinedAngle;
+  }
+
+  *outBestShot = bestShot;
+  return true;
+}
+
+static EGLContext s_lastEglContext = EGL_NO_CONTEXT;
+
 static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+  EGLContext currentContext = eglGetCurrentContext();
+  if (currentContext != s_lastEglContext) {
+    s_lastEglContext = currentContext;
+    s_glInitialized = false;
+    s_lineProgram = 0;
+    s_circleProgram = 0;
+  }
+
   // Per-second adaptive AI tick (runs EMA update and accuracy adaptation at
   // most once per 1000ms)
   catengine::ai::AdaptiveLearningEngine::getInstance().tickSecondUpdate();
@@ -1680,7 +1712,14 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     height = surfH;
   }
 
-  if (!s_glInitialized && width > 0 && height > 0) {
+  if (width < 50 || height < 50 || currentContext == EGL_NO_CONTEXT) {
+    if (orig_eglSwapBuffers) {
+      return orig_eglSwapBuffers(dpy, surface);
+    }
+    return EGL_TRUE;
+  }
+
+  if (!s_glInitialized) {
     initGLES();
   }
 
@@ -1689,7 +1728,7 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
   // STRICT MATCH ACTIVE GATE:
   // When a match is NOT active, do not show lines, table border, pucks,
   // striker, pockets, or anything at all!
-  if (!matchActive) {
+  if (!matchActive || !s_glInitialized || s_lineProgram == 0 || s_circleProgram == 0) {
     if (orig_eglSwapBuffers) {
       return orig_eglSwapBuffers(dpy, surface);
     }
@@ -1747,15 +1786,29 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // Naturally centered on the screen (width * 0.5f, height * 0.5f)
     float boardCenterX = width * 0.5f;
     float boardCenterY = height * 0.5f;
-    if (height > width * 1.8f) {
-      boardCenterY = height * 0.5f - 9.5f;
-    }
-    float boardScale = (width * 0.94144f) / (2.0f * kBoardHalfSize);
+    float boardScale = (width * 0.9358f) / (2.0f * kBoardHalfSize);
 
     float tableMVP[16];
     bool calibrated = false;
+    bool isRotated = s_isTableRotated.load();
 
-    if (s_hasManualBounds.load()) {
+    // Calibration State Machine:
+    // Priority 1: Exact Native Cocos2d Affine Transform from libgame.so (ground truth)
+    // Priority 2: Anisotropic Manual Calibration Bounds (scaleX and scaleY separated, no aspect squish)
+    // Priority 3: Universal default isotropic screen estimate
+    bool hasNative = s_hasNativeAffine.load() &&
+                     (std::hypot(s_nativeAffineA.load(), s_nativeAffineB.load()) > 0.1);
+
+    if (hasNative) {
+      buildNativeAffineTableMatrix(tableMVP, static_cast<float>(width),
+                                   static_cast<float>(height),
+                                   s_nativeAffineA.load(), s_nativeAffineB.load(),
+                                   s_nativeAffineC.load(), s_nativeAffineD.load(),
+                                   s_nativeAffineTx.load(), s_nativeAffineTy.load());
+      double sc = std::hypot(s_nativeAffineA.load(), s_nativeAffineB.load());
+      if (sc > 0.1) boardScale = static_cast<float>(sc);
+      calibrated = true;
+    } else if (s_hasManualBounds.load()) {
       float rawL = s_manualL.load();
       float rawR = s_manualR.load();
       float rawB = s_manualB.load();
@@ -1766,23 +1819,26 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
       float bottomY_android = std::max(rawB, rawT);
       float cx = (left + right) * 0.5f;
       float cy_android = (topY_android + bottomY_android) * 0.5f;
-      // Invert Android screen Y into OpenGL viewport Y:
       float cy = height - cy_android;
-      float sc = std::min(right - left, bottomY_android - topY_android) /
-                 (2.0f * kBoardHalfSize);
-      if (sc > 3.0f && cx >= width * 0.15f && cx <= width * 0.85f) {
+      float scaleX = (right - left) / (2.0f * kBoardHalfSize);
+      float scaleY = (bottomY_android - topY_android) / (2.0f * kBoardHalfSize);
+      if (scaleX > 3.0f && scaleY > 3.0f && cx >= width * 0.15f && cx <= width * 0.85f) {
         boardCenterX = cx;
         boardCenterY = cy;
-        boardScale = sc;
+        boardScale = (scaleX + scaleY) * 0.5f;
         calibrated = true;
       }
+      buildUniversalTableMatrix(tableMVP, static_cast<float>(width),
+                                static_cast<float>(height), boardCenterX,
+                                boardCenterY, scaleX, scaleY, isRotated);
+    } else {
+      buildUniversalTableMatrix(tableMVP, static_cast<float>(width),
+                                static_cast<float>(height), boardCenterX,
+                                boardCenterY, boardScale, boardScale, isRotated);
     }
-    // Universal Table Matrix: Perfectly centered on the physical screen without design resolution skew
-    buildUniversalTableMatrix(tableMVP, static_cast<float>(width),
-                              static_cast<float>(height), boardCenterX,
-                              boardCenterY, boardScale);
 
-    float feather = (boardScale > 0.1f) ? (1.2f / boardScale) : 0.045f;
+    // Sub-pixel antialiasing zone: exactly 0.75 pixels in board space
+    float feather = (boardScale > 0.1f) ? (0.75f / boardScale) : 0.035f;
 
     if (showBorder) {
       float th = 0.85f;
@@ -1864,8 +1920,11 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     }
 
     float baseThickness = s_guidelineThickness.load();
-    if (baseThickness < 0.10f || baseThickness > 0.40f)
-      baseThickness = 0.20f; // Sleek, non-obstructive hairline guideline
+    if (baseThickness <= 0.05f) {
+      baseThickness = 0.45f;
+    } else {
+      baseThickness = std::clamp(baseThickness, 0.10f, 3.50f);
+    }
     float stRadius = s_strikerRadius.load();
     float pkRadius = s_puckRadius.load();
 
@@ -1884,8 +1943,39 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     bool autoShotEnabled = s_autoShotEnabled.load();
     bool autoShotActive = autoShotEnabled && s_isShotExecuting.load();
     bool reviewFrozen = s_isReviewFrozen.load();
-    bool localTurnReady = CatEngine_IsLocalTurnReady();
     bool keepLine = s_keepLineAfterShot.load();
+    bool passAndPlayBoth = s_passAndPlayBothSides.load();
+
+    // Turn & Baseline State Machine:
+    // Determine which player's turn it is based on the striker's baseline Y position.
+    // Bottom baseline (Y < -12.0) = Local Player (User)
+    // Top baseline (Y > 12.0) = Opponent / Friend (Pass & Play)
+    bool isStrikerOnOpponentSide = isRotated ? (curY < -12.0) : (curY > 12.0);
+    bool isStrikerOnLocalSide = isRotated ? (curY > 12.0) : (curY < -12.0);
+
+    bool isTurnActive = false;
+    if (isStrikerOnOpponentSide) {
+      // Striker is on Friend/Opponent side:
+      // ONLY active if Pass & Play Both Sides is explicitly enabled!
+      // If Pass & Play Both Sides is OFF: STRICTLY HIDE all guidelines ("my chance not friends chance")!
+      isTurnActive = passAndPlayBoth;
+    } else if (isStrikerOnLocalSide) {
+      // Striker is on User's local side:
+      isTurnActive = true;
+    } else {
+      // Striker is out on the board (e.g. shot rolling or transitioning)
+      isTurnActive = shotInProgress ? (keepLine && s_hasPersistedSim) : false;
+    }
+
+    bool localTurnReady = isTurnActive && CatEngine_IsLocalTurnReady();
+
+    // If turn switched to another baseline or is inactive, dismiss any old review freeze from previous player
+    if (!isTurnActive || isStrikerOnOpponentSide != (s_frozenLaunchY.load() > 0.0)) {
+      if (reviewFrozen && !shotInProgress) {
+        reviewFrozen = false;
+        s_isReviewFrozen.store(false);
+      }
+    }
 
     bool isAutoScanning = (autoShotEnabled && localTurnReady && !isAiming &&
                            !shotInProgress && !reviewFrozen && !autoShotActive);
@@ -1898,16 +1988,14 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     static AimSimulationResult s_cachedAimSim;
     static bool s_hasCachedAimSim = false;
 
-    // 1. If keepLine is ON and shot is in progress: freeze the launched
-    // trajectory line
-    if (keepLine && shotInProgress && s_hasPersistedSim) {
+    // 1. If keepLine is ON and shot is in progress: freeze the launched trajectory line
+    if (keepLine && shotInProgress && s_hasPersistedSim && isTurnActive) {
       std::lock_guard<std::mutex> lock(s_persistedSimMutex);
       sim = s_persistedSim;
       hasSim = true;
     }
-    // 2. Active aiming touch or auto-shot execution: live aim takes highest
-    // priority!
-    else if (isAiming || autoShotActive) {
+    // 2. Active aiming touch or auto-shot execution: simulate the live striker aim vector
+    else if (isTurnActive && (isAiming || autoShotActive)) {
       s_isReviewFrozen.store(false);
       s_waitingForHandMove.store(false);
 
@@ -1915,19 +2003,28 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
       if (effectiveForce < 0.05)
         effectiveForce = 1.0; // Show full preview line when rotating direction
 
+      double effectiveAngle = shotAngle;
+      if (std::isnan(effectiveAngle) || std::abs(effectiveAngle) > 100.0) {
+        effectiveAngle = (curY > 0.0) ? (-M_PI / 2.0) : (M_PI / 2.0);
+      }
+
+      static uint64_t s_lastPuckVersion = 0;
+      uint64_t curPuckVer = s_puckVersion.load();
       bool inputChanged = !s_hasCachedAimSim ||
-                          std::abs(curX - s_lastSimX) > 0.03 ||
-                          std::abs(curY - s_lastSimY) > 0.03 ||
-                          std::abs(shotAngle - s_lastSimAngle) > 0.003 ||
-                          std::abs(effectiveForce - s_lastSimForce) > 0.01;
+                          (curPuckVer != s_lastPuckVersion) ||
+                          std::abs(curX - s_lastSimX) > 1e-4 ||
+                          std::abs(curY - s_lastSimY) > 1e-4 ||
+                          std::abs(effectiveAngle - s_lastSimAngle) > 1e-5 ||
+                          std::abs(effectiveForce - s_lastSimForce) > 1e-4;
 
       if (inputChanged) {
-        sim = simulateStrikerTrajectory(curX, curY, shotAngle, effectiveForce,
+        sim = simulateStrikerTrajectory(curX, curY, effectiveAngle, effectiveForce,
                                         5000);
         s_cachedAimSim = sim;
+        s_lastPuckVersion = curPuckVer;
         s_lastSimX = curX;
         s_lastSimY = curY;
-        s_lastSimAngle = shotAngle;
+        s_lastSimAngle = effectiveAngle;
         s_lastSimForce = effectiveForce;
         s_hasCachedAimSim = true;
         if (keepLine) {
@@ -1940,9 +2037,8 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
       }
       hasSim = true;
     }
-    // 3. Auto-Shot actively scanning candidate angles: ONLY show when Auto-Shot
-    // is ON and actively scanning!
-    else if (autoShotEnabled && s_isActivelySearching.load()) {
+    // 3. Auto-Shot actively scanning candidate angles: ONLY show when Auto-Shot is ON and actively scanning!
+    else if (isTurnActive && autoShotEnabled && s_isActivelySearching.load()) {
       double scanX = s_scanLiveX.load();
       double scanY = s_scanLiveY.load();
       double scanA = s_scanLiveAngle.load();
@@ -1950,9 +2046,8 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
       hasSim = true;
     }
     // 4. Striker returned to baseline and "keep line after shot" is active:
-    // Hold the post-shot guideline until the user manually pulls to aim or
-    // slides the striker!
-    else if (keepLine && reviewFrozen && s_hasPersistedSim && !isAiming) {
+    // Hold the post-shot guideline until the user manually pulls to aim or slides the striker!
+    else if (isTurnActive && keepLine && reviewFrozen && s_hasPersistedSim && !isAiming) {
       std::lock_guard<std::mutex> lock(s_persistedSimMutex);
       sim = s_persistedSim;
       hasSim = true;
@@ -1977,6 +2072,10 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
       if (effectiveColor == 0 || effectiveColor == 4) {
         effectiveColor =
             s_autoDetectedColor.load(); // Dynamic real-time auto detection
+      }
+      if (isStrikerOnOpponentSide && passAndPlayBoth && effectiveColor != 0) {
+        // Friend's turn: invert legal target color (friend targets the opposing color)
+        effectiveColor = (effectiveColor == 1) ? 2 : (effectiveColor == 2 ? 1 : effectiveColor);
       }
 
       // Only mark target as illegal IF player has an established/locked color
@@ -2028,7 +2127,7 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
 
     // Render the 4 Corner Pocket Detection Guides (clean, unobtrusive
     // wireframe)
-    if (s_showPocket.load() && (localTurnReady || s_passAndPlayBothSides.load())) {
+    if (s_showPocket.load() && localTurnReady) {
       for (int p = 0; p < 4; p++) {
         float pcx = pocketCenters[p][0];
         float pcy = pocketCenters[p][1];
@@ -2052,7 +2151,7 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
 
     // Render subtle ring ONLY on the target puck being aimed at (never obscure
     // coins with filled discs)
-    if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0 && (localTurnReady || s_passAndPlayBothSides.load())) {
+    if (hasSim && sim.hasFirstContact && sim.firstContactPuckId >= 0 && localTurnReady) {
       std::lock_guard<std::mutex> lock(s_puckMutex);
       for (const auto &pe : s_puckList) {
         if (pe.id == sim.firstContactPuckId && pe.active &&
@@ -2080,14 +2179,14 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
       }
     } else {
       // Live striker circle on baseline (strictly active player's turn or when both sides enabled)
-      if (localTurnReady || s_passAndPlayBothSides.load()) {
+      if (localTurnReady) {
         drawTableCircle(tableMVP, feather, strikerCircleX, strikerCircleY,
                         stRadius, stColor.r, stColor.g, stColor.b,
                         0.45f * lineAlpha);
       }
     }
 
-    if (hasSim && s_showPrediction.load() && (localTurnReady || s_passAndPlayBothSides.load())) {
+    if (hasSim && s_showPrediction.load() && localTurnReady) {
       if (sim.strikerInPocket || isIllegalTarget) {
         // Warning Red line for scratch foul or illegal target!
         stColor = {1.0f, 0.18f, 0.18f, 1.0f};
@@ -2111,25 +2210,95 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         sim.segments.push_back(fallbackSeg);
       }
 
-      // 1. Draw Striker Guideline Segments as a seamless continuous mitered
-      // polyline
-      if (!sim.segments.empty()) {
-        std::vector<MCPointFloat> stPts;
-        stPts.reserve(sim.segments.size() + 1);
-        stPts.push_back({sim.segments[0].startX, sim.segments[0].startY});
-        for (const auto &seg : sim.segments) {
-          stPts.push_back({seg.endX, seg.endY});
+      // Separate incident segments (up to first impact) from post-impact deflection segments
+      std::vector<MCPointFloat> incidentPts;
+      std::vector<MCPointFloat> deflectPts;
+      bool hitOccurred = false;
+
+      incidentPts.push_back({sim.segments[0].startX, sim.segments[0].startY});
+      for (const auto &seg : sim.segments) {
+        if (!hitOccurred) {
+          incidentPts.push_back({seg.endX, seg.endY});
+          if (seg.isPuckHit || (sim.hasFirstContact &&
+              std::hypot(seg.endX - sim.firstImpactStrikerX, seg.endY - sim.firstImpactStrikerY) < 0.25f)) {
+            hitOccurred = true;
+            deflectPts.push_back({seg.endX, seg.endY});
+          }
+        } else {
+          deflectPts.push_back({seg.endX, seg.endY});
         }
-        drawTablePolyline(tableMVP, feather, stPts, baseThickness, stColor.r,
-                          stColor.g, stColor.b, stColor.a * lineAlpha);
       }
 
-      // 2. Ghost Striker Circle at Rest
-      drawTableCircle(tableMVP, feather, sim.finalStrikerX, sim.finalStrikerY,
-                      stRadius, stColor.r, stColor.g, stColor.b,
-                      stColor.a * lineAlpha);
+      // Check if user is aiming aligned with recommended shot
+      bool isAlignedWithRecommended = false;
+      if (s_hasRecommendedShot.load()) {
+        std::lock_guard<std::mutex> lock(s_guideMutex);
+        if (s_hasRecommendedShot.load() && s_recommendedShot.potted) {
+          double angleDiff = std::abs(shotAngle - s_recommendedShot.angleRad);
+          while (angleDiff > M_PI) angleDiff = std::abs(angleDiff - 2.0 * M_PI);
+          if (angleDiff < 0.05 && std::abs(curX - s_recommendedShot.candX) < 1.0) {
+            isAlignedWithRecommended = true;
+          }
+        }
+      }
 
-      // 3. Struck Puck Guidelines & Landing Circles
+      BodyColor drawStColor = stColor;
+      if (isAlignedWithRecommended && !sim.strikerInPocket && !isIllegalTarget) {
+        // Glowing Neon Emerald when perfectly locked onto recommended shot!
+        drawStColor = kPotColor;
+      }
+
+      // 1. Draw Striker Incident Guideline up to Impact Point
+      if (!incidentPts.empty()) {
+        drawTablePolyline(tableMVP, feather, incidentPts, baseThickness,
+                          drawStColor.r, drawStColor.g, drawStColor.b, drawStColor.a * lineAlpha);
+      }
+
+      // 2. Ghost Striker at First Contact Point (Critical Collision Geometry)
+      if (sim.hasFirstContact) {
+        // Outer Ghost Ring
+        drawTableRing(tableMVP, feather, sim.firstImpactStrikerX, sim.firstImpactStrikerY,
+                      stRadius, std::max(0.0f, stRadius - 0.18f),
+                      drawStColor.r, drawStColor.g, drawStColor.b, 0.95f * lineAlpha);
+        // Inner Translucent Fill
+        drawTableCircle(tableMVP, feather, sim.firstImpactStrikerX, sim.firstImpactStrikerY,
+                        std::max(0.0f, stRadius - 0.18f),
+                        drawStColor.r, drawStColor.g, drawStColor.b, 0.35f * lineAlpha);
+
+        // Striker-to-Puck Contact Normal Vector
+        drawTableLine(tableMVP, feather, sim.firstImpactStrikerX, sim.firstImpactStrikerY,
+                      sim.firstImpactPuckX, sim.firstImpactPuckY, baseThickness * 0.75f,
+                      1.0f, 1.0f, 1.0f, 0.90f * lineAlpha, false);
+
+        // Target Puck Collision Highlight Ring
+        drawTableRing(tableMVP, feather, sim.firstImpactPuckX, sim.firstImpactPuckY,
+                      pkRadius * 1.08f, pkRadius * 0.88f,
+                      1.0f, 1.0f, 1.0f, 0.92f * lineAlpha);
+      }
+
+      // 3. Striker Post-Impact Deflection / Rebound Path
+      if (deflectPts.size() >= 2) {
+        if (sim.strikerInPocket) {
+          // Warning Crimson Red for scratch foul into pocket!
+          drawTablePolyline(tableMVP, feather, deflectPts, baseThickness * 0.85f,
+                            1.0f, 0.18f, 0.18f, 0.95f * lineAlpha);
+        } else {
+          // Soft Secondary Deflection
+          drawTablePolyline(tableMVP, feather, deflectPts, baseThickness * 0.65f,
+                            drawStColor.r, drawStColor.g, drawStColor.b, 0.45f * lineAlpha);
+        }
+        // Landing ring at rest
+        drawTableRing(tableMVP, feather, sim.finalStrikerX, sim.finalStrikerY,
+                      stRadius, std::max(0.0f, stRadius - 0.15f),
+                      drawStColor.r, drawStColor.g, drawStColor.b, 0.40f * lineAlpha);
+      } else if (!sim.hasFirstContact) {
+        // No puck hit: ghost circle at rest
+        drawTableCircle(tableMVP, feather, sim.finalStrikerX, sim.finalStrikerY,
+                        stRadius, drawStColor.r, drawStColor.g, drawStColor.b,
+                        0.35f * lineAlpha);
+      }
+
+      // 4. Struck Puck Guidelines & Landing Circles
       if (sim.hitPuck || !sim.puckTrajectories.empty()) {
         for (size_t p = 0; p < sim.puckTrajectories.size(); p++) {
           const auto &traj = sim.puckTrajectories[p];
@@ -2178,6 +2347,132 @@ static EGLBoolean my_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                           pkColor.g, pkColor.b, 0.75f * lineAlpha);
           }
         }
+      }
+    } else if (!isAiming && s_showPrediction.load() && localTurnReady && !shotInProgress && !reviewFrozen) {
+      // ---------------------------------------------------------------------------------
+      // PASSIVE SHOT GUIDANCE / AI COACH
+      // Guides the player by suggesting:
+      // 1. Where to place the striker on baseline (pulsing beacon + slide arrow)
+      // 2. Incident aim trajectory to pocket the coin
+      // 3. Ghost striker at impact showing the cut angle
+      // 4. Emerald green trajectory of target coin directly into pocket
+      // 5. Recommended pull force & direction indicator
+      // ---------------------------------------------------------------------------------
+      int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+      if (nowMs - s_lastGuideEvalMs.load() > 220) {
+        s_lastGuideEvalMs.store(nowMs);
+        CandidateShot cand;
+        if (GraphicsEngine_FindBestCandidateShot(&cand, curX, curY)) {
+          AimSimulationResult simRes = simulateStrikerTrajectory(
+              cand.candX, cand.candY, cand.angleRad, cand.forceVal, 2200);
+          std::lock_guard<std::mutex> lock(s_guideMutex);
+          s_recommendedShot = cand;
+          s_recommendedSim = simRes;
+          s_hasRecommendedShot.store(true);
+        } else {
+          std::lock_guard<std::mutex> lock(s_guideMutex);
+          s_hasRecommendedShot.store(false);
+        }
+      }
+
+      CandidateShot localRecShot;
+      AimSimulationResult localRecSim;
+      bool hasRecShot = false;
+      if (s_hasRecommendedShot.load()) {
+        std::lock_guard<std::mutex> lock(s_guideMutex);
+        if (s_hasRecommendedShot.load()) {
+          localRecShot = s_recommendedShot;
+          localRecSim = s_recommendedSim;
+          hasRecShot = true;
+        }
+      }
+
+      if (hasRecShot && localRecShot.potted) {
+        float pulse = 0.5f + 0.5f * std::sin(static_cast<float>(nowMs) * 0.006f);
+        float beaconOuterR = stRadius * (1.10f + 0.12f * pulse);
+        float beaconInnerR = stRadius * 0.92f;
+        float recX = localRecShot.candX;
+        float baseRecY = localY;
+
+        // 1. Suggested Striker Placement Beacon on Baseline
+        drawTableRing(tableMVP, feather, recX, baseRecY, beaconOuterR, beaconInnerR,
+                      0.0f, 0.95f, 1.0f, 0.90f * lineAlpha);
+        drawTableCircle(tableMVP, feather, recX, baseRecY, beaconInnerR,
+                      0.0f, 0.95f, 1.0f, 0.28f * lineAlpha);
+
+        // 1b. Horizontal connecting slide track if player striker is away from beacon
+        if (std::abs(curX - recX) > 0.6f) {
+          drawTableLine(tableMVP, feather, static_cast<float>(curX), baseRecY,
+                        recX, baseRecY, 0.22f, 0.0f, 0.85f, 1.0f, 0.60f * lineAlpha, false);
+          float midX = static_cast<float>(curX + recX) * 0.5f;
+          drawTableCircle(tableMVP, feather, midX, baseRecY, 0.38f,
+                          0.0f, 0.95f, 1.0f, 0.75f * lineAlpha);
+        }
+
+        // 2. Suggested Striker Incident Guideline to Collision
+        const auto &rSim = localRecSim;
+        if (rSim.hasFirstContact) {
+          drawTableLine(tableMVP, feather, recX, baseRecY,
+                        rSim.firstImpactStrikerX, rSim.firstImpactStrikerY,
+                        baseThickness, 0.0f, 0.95f, 1.0f, 0.88f * lineAlpha, false);
+
+          // 3. Ghost Striker at Suggested Point of Impact
+          drawTableRing(tableMVP, feather, rSim.firstImpactStrikerX, rSim.firstImpactStrikerY,
+                        stRadius, std::max(0.0f, stRadius - 0.18f),
+                        0.0f, 0.95f, 1.0f, 0.92f * lineAlpha);
+          drawTableCircle(tableMVP, feather, rSim.firstImpactStrikerX, rSim.firstImpactStrikerY,
+                          std::max(0.0f, stRadius - 0.18f),
+                          0.0f, 0.95f, 1.0f, 0.32f * lineAlpha);
+
+          // Contact Normal Line to Puck
+          drawTableLine(tableMVP, feather, rSim.firstImpactStrikerX, rSim.firstImpactStrikerY,
+                        rSim.firstImpactPuckX, rSim.firstImpactPuckY, baseThickness * 0.75f,
+                        1.0f, 1.0f, 1.0f, 0.88f * lineAlpha, false);
+
+          // Target Puck Ring
+          drawTableRing(tableMVP, feather, rSim.firstImpactPuckX, rSim.firstImpactPuckY,
+                        pkRadius * 1.10f, pkRadius * 0.88f,
+                        0.0f, 1.0f, 0.40f, 0.90f * lineAlpha);
+        }
+
+        // 4. Predicted Target Puck Path into Pocket
+        for (const auto &traj : rSim.puckTrajectories) {
+          if (traj.inPocket) {
+            if (traj.segments.empty()) {
+              drawTableLine(tableMVP, feather, traj.startX, traj.startY,
+                            traj.finalX, traj.finalY, baseThickness,
+                            kPotColor.r, kPotColor.g, kPotColor.b, 0.95f * lineAlpha, false);
+            } else {
+              std::vector<MCPointFloat> pts;
+              pts.reserve(traj.segments.size() + 1);
+              pts.push_back({traj.segments[0].startX, traj.segments[0].startY});
+              for (const auto &seg : traj.segments) {
+                pts.push_back({seg.endX, seg.endY});
+              }
+              drawTablePolyline(tableMVP, feather, pts, baseThickness,
+                                kPotColor.r, kPotColor.g, kPotColor.b, 0.95f * lineAlpha);
+            }
+            // Glowing emerald target pocket ring
+            drawTableRing(tableMVP, feather, traj.finalX, traj.finalY,
+                          pkRadius * 1.25f, pkRadius * 0.85f,
+                          kPotColor.r, kPotColor.g, kPotColor.b, 0.90f * lineAlpha);
+          }
+        }
+
+        // 5. Recommended Pull Force & Direction Indicator
+        double pullAngle = localRecShot.angleRad + M_PI;
+        float pullDist = static_cast<float>(localRecShot.forceVal) * 4.6f;
+        float pullEndX = recX + pullDist * static_cast<float>(std::cos(pullAngle));
+        float pullEndY = baseRecY + pullDist * static_cast<float>(std::sin(pullAngle));
+
+        drawTableLine(tableMVP, feather, recX, baseRecY, pullEndX, pullEndY,
+                      0.26f, 1.0f, 0.80f, 0.15f, 0.85f * lineAlpha, false);
+        drawTableRing(tableMVP, feather, pullEndX, pullEndY, 0.60f, 0.42f,
+                      1.0f, 0.80f, 0.15f, 0.90f * lineAlpha);
+        drawTableCircle(tableMVP, feather, pullEndX, pullEndY, 0.25f,
+                        1.0f, 0.80f, 0.15f, 0.70f * lineAlpha);
       }
     }
 
@@ -2278,7 +2573,9 @@ void setGraphicsMatchActive(bool active) {
     s_hasPersistedSim = false;
     s_isReviewFrozen.store(false);
     s_waitingForHandMove.store(false);
-    GraphicsEngine_ClearPucks();
+    s_hasRecommendedShot.store(false);
+    s_lastGuideEvalMs.store(0);
+    clearPucks();
   }
   ALOGI("[CatEngine] Match active state: %d", active ? 1 : 0);
 }
@@ -2327,14 +2624,6 @@ void GraphicsEngine_SetBoardBounds(float left, float right, float bottom,
         left, right, bottom, top, s_showBorder.load() ? 1 : 0);
 }
 
-void GraphicsEngine_SetBoardCalibration(float centerX, float centerY,
-                                        float scale) {
-  s_autoCenterX.store(centerX);
-  s_autoCenterY.store(centerY);
-  s_autoScale.store(scale);
-  s_hasEngineCalibration.store(true);
-}
-
 void GraphicsEngine_SetAutoCalibration(float centerX, float centerY,
                                        float scale, bool fromEngine) {
   if (scale > 5.0f) {
@@ -2369,13 +2658,6 @@ void GraphicsEngine_ResetToAuto() {
   s_hasUserPocketRadius.store(false);
 }
 
-bool GraphicsEngine_HasManualBounds() { return s_hasManualBounds.load(); }
-
-void GraphicsEngine_OnTableSpacePoint(double tx, double ty, double sx,
-                                      double sy) {
-  // Dynamic projection refinement
-}
-
 void GraphicsEngine_SetBaselineRange(float minX, float maxX) {
   s_baselineMinX.store(minX);
   s_baselineMaxX.store(maxX);
@@ -2408,7 +2690,7 @@ void GraphicsEngine_OnMatchDestroyed() {
   s_waitingForHandMove.store(false);
   s_isAiming.store(false);
   s_turnScanStartTimeMs.store(0);
-  GraphicsEngine_ClearPucks();
+  clearPucks();
 }
 
 void GraphicsEngine_SetPocketRadius(float radius) {
@@ -2464,14 +2746,6 @@ void GraphicsEngine_SetPhysicalConstants(
         "PkFric=%.4f (raw=%.4f), Mass=%.2f, CushRest=%.3f",
         calibratedStriker, strikerFriction, calibratedPuck, puckFriction,
         strikerMass, cushionRestitution);
-}
-
-void GraphicsEngine_SetFriction(double strikerFriction, double puckFriction) {
-  if (s_userManualPhysics.load())
-    return;
-  // Clamp to calibrated minimums (see SetPhysicalConstants)
-  s_strikerFriction.store(std::max(strikerFriction, 0.1600));
-  s_puckFriction.store(std::max(puckFriction, 0.1080));
 }
 
 void GraphicsEngine_SetFineTunePhysics(
@@ -2542,9 +2816,6 @@ void GraphicsEngine_GetFineTunePhysics(
     *powerMultiplier = s_powerMultiplier.load();
 }
 
-void GraphicsEngine_SaveAutoCorrectedPhysics() {}
-void GraphicsEngine_LoadAutoCorrectedPhysics() {}
-
 void GraphicsEngine_SetGuidelineThickness(float thickness) {
   s_guidelineThickness.store(thickness);
 }
@@ -2561,10 +2832,13 @@ void GraphicsEngine_UpdatePuck(int index, double x, double y, bool active,
   std::lock_guard<std::mutex> lock(s_puckMutex);
   for (auto &pe : s_puckList) {
     if (pe.id == index) {
-      pe.x = x;
-      pe.y = y;
-      pe.active = effectiveActive;
-      pe.puckType = puckType;
+      if (std::abs(pe.x - x) > 1e-4 || std::abs(pe.y - y) > 1e-4 || pe.active != effectiveActive) {
+        pe.x = x;
+        pe.y = y;
+        pe.active = effectiveActive;
+        pe.puckType = puckType;
+        s_puckVersion.fetch_add(1);
+      }
       return;
     }
   }
@@ -2576,6 +2850,7 @@ void GraphicsEngine_UpdatePuck(int index, double x, double y, bool active,
     pe.active = true;
     pe.puckType = puckType;
     s_puckList.push_back(pe);
+    s_puckVersion.fetch_add(1);
   }
 
   static int s_puckUpdateCount = 0;
@@ -2586,16 +2861,12 @@ void GraphicsEngine_UpdatePuck(int index, double x, double y, bool active,
   }
 }
 
-void GraphicsEngine_ClearPucks() {
-  std::lock_guard<std::mutex> lock(s_puckMutex);
-  s_puckList.clear();
-}
-
 void GraphicsEngine_SyncAllPucks(const GraphicsPuckInfo *pucks, int count) {
   float pkInset = s_pocketInset.load();
   float pkRad = s_puckRadius.load();
   std::lock_guard<std::mutex> lock(s_puckMutex);
   s_puckList.clear();
+  s_puckVersion.fetch_add(1);
   if (!pucks || count <= 0)
     return;
   s_puckList.reserve(count);
@@ -2681,6 +2952,13 @@ void GraphicsEngine_SetReviewFreeze(bool freeze) {
 }
 
 bool GraphicsEngine_IsReviewFrozen() { return s_isReviewFrozen.load(); }
+
+void GraphicsEngine_ResetPersistedShot() {
+  std::lock_guard<std::mutex> lock(s_persistedSimMutex);
+  s_hasPersistedSim = false;
+  s_isReviewFrozen.store(false);
+  s_waitingForHandMove.store(false);
+}
 
 static std::atomic<int> s_telemetryShotCounter(0);
 
@@ -2802,64 +3080,6 @@ ShotPredictionTelemetry GraphicsEngine_CaptureShotPrediction(double startX,
   return tele;
 }
 
-AnglePocketOutcome GraphicsEngine_PredictAnglePocket(double shotAngleRad,
-                                                     double forceVal) {
-  AnglePocketOutcome outcome;
-  outcome.willPocketPuck = false;
-  outcome.pocketedPuckId = -1;
-  outcome.pocketedPuckType = 0;
-  outcome.strikerScratched = false;
-  outcome.cushionBounces = 0;
-
-  double curX = 0.0, curY = s_strikerY;
-  {
-    std::lock_guard<std::mutex> lock(s_posMutex);
-    curX = s_strikerX;
-    curY = s_strikerY;
-  }
-
-  AimSimulationResult sim =
-      simulateStrikerTrajectory(curX, curY, shotAngleRad, forceVal);
-
-  float pkInset = s_pocketInset.load();
-  float pkRad = s_pocketRadius.load();
-  if (isInsidePocketHole(sim.finalStrikerX, sim.finalStrikerY, pkInset,
-                         pkRad)) {
-    outcome.strikerScratched = true;
-  }
-
-  for (const auto &traj : sim.puckTrajectories) {
-    if (traj.inPocket) {
-      outcome.willPocketPuck = true;
-      outcome.pocketedPuckId = traj.puckIndex;
-      outcome.pocketedPuckType = traj.puckType;
-      for (const auto &seg : traj.segments) {
-        if (seg.isCushionBounce)
-          outcome.cushionBounces++;
-      }
-      break;
-    }
-  }
-
-  return outcome;
-}
-
-bool GraphicsEngine_WillAnglePocket(double shotAngleRad, double forceVal) {
-  AnglePocketOutcome o =
-      GraphicsEngine_PredictAnglePocket(shotAngleRad, forceVal);
-  return (o.willPocketPuck && !o.strikerScratched);
-}
-
-bool checkAndProcessPocketingAngle(double forceVal) {
-  for (double deg = 0.0; deg < 360.0; deg += 1.0) {
-    double rad = deg * M_PI / 180.0;
-    if (GraphicsEngine_WillAnglePocket(rad, forceVal)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool GraphicsEngine_IsShotExecuting() { return s_isShotExecuting.load(); }
 
 // Forward declarations from catEngine.cpp
@@ -2874,57 +3094,6 @@ static const char *getPuckTypeName(int type) {
   if (type == 1)
     return "White (Blue)";
   return "Unknown";
-}
-
-void GraphicsEngine_PullAndReleaseStriker(double angleRad, double forceVal) {
-  if (s_isShotExecuting.exchange(true)) {
-    ALOGW("[AUTO-SHOT EXECUTE] Shot already executing, ignoring duplicate "
-          "trigger.");
-    return;
-  }
-
-  std::thread([angleRad, forceVal]() {
-    // Minimal 1ms pause so striker placement on baseline is registered
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-
-    bool shotOk = CatEngine_ExecuteInEngineShot(angleRad, forceVal);
-    if (!shotOk) {
-      ALOGE("[AUTO-SHOT RESULT: FAILED] CatEngine_ExecuteInEngineShot returned "
-            "false! Resetting s_isShotExecuting flag.");
-      s_isShotExecuting.store(false);
-      return;
-    }
-
-    // Minimal 1ms cooldown
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    s_isShotExecuting.store(false);
-    ALOGI("[AUTO-SHOT EXECUTE] Shot execution complete.");
-  }).detach();
-}
-
-void GraphicsEngine_PullAndReleaseStrikerDegrees(double angleDeg,
-                                                 double forceVal) {
-  GraphicsEngine_PullAndReleaseStriker(angleDeg * M_PI / 180.0, forceVal);
-}
-
-static std::atomic<bool> s_continuousSearchRunning(false);
-
-void startContinuousAnglePocketSearch() {
-  if (s_continuousSearchRunning.exchange(true))
-    return;
-
-  std::thread([]() {
-    while (s_continuousSearchRunning.load()) {
-      if (s_matchActive.load()) {
-        checkAndProcessPocketingAngle(1.0);
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-  }).detach();
-}
-
-void stopContinuousAnglePocketSearch() {
-  s_continuousSearchRunning.store(false);
 }
 
 bool GraphicsEngine_IsMatchActive() { return s_matchActive.load(); }
@@ -2960,281 +3129,6 @@ void GraphicsEngine_SetAutoDetectedColor(int color) {
 
 int GraphicsEngine_GetAutoDetectedColor() { return s_autoDetectedColor.load(); }
 
-// =========================================================================================
-// AUTO-STRIKE COMBINATION SEARCH CONTROLLER (HIGH-SPEED DYNAMIC BASELINE &
-// ALL-ANGLE SCANNER)
-// =========================================================================================
-struct CandidateShot {
-  float candX = 0.0f;
-  float candY = 0.0f; // Will be set to live baselineY at scan time
-  double angleRad = 0.0;
-  double forceVal = 1.0;
-  int tier = 99; // 1 = Direct Clean, 2 = 1-Cushion Bank, 3 = Direct Combo, 4 =
-                 // Multi-Bank
-  double score = -1e9;
-  double riskScore = 999.0; // Lower is safer/cleaner (0-100)
-  int targetPuckId = -1;
-  int targetPuckType = 1;
-  bool potted = false;
-  int pocketId = -1;
-  int cushionCount = 0;
-  int secondaryHits = 0;
-  double cutAngleDeg = 0.0;
-  double puckStartX = 0.0;
-  double puckStartY = 0.0;
-  double predLandingX = 0.0;
-  double predLandingY = 0.0;
-};
-
-static CandidateShot s_cachedFallbackTier2;
-static CandidateShot s_cachedFallbackTier3;
-
-static inline double distSqToSegment(double px, double py, double ax, double ay,
-                                     double bx, double by) {
-  double abx = bx - ax;
-  double aby = by - ay;
-  double apx = px - ax;
-  double apy = py - ay;
-  double abLenSq = abx * abx + aby * aby;
-  if (abLenSq < 1e-6) {
-    return apx * apx + apy * apy;
-  }
-  double t = std::clamp((apx * abx + apy * aby) / abLenSq, 0.0, 1.0);
-  double closestX = ax + t * abx;
-  double closestY = ay + t * aby;
-  double dx = px - closestX;
-  double dy = py - closestY;
-  return dx * dx + dy * dy;
-}
-
-static bool evaluateCandidateShot(const AimSimulationResult &sim, float candX,
-                                  float candY, double angleRad, double forceVal,
-                                  CandidateShot *outCand,
-                                  bool allowBankShots = false) {
-  if (!outCand)
-    return false;
-
-  float pkInset = s_pocketInset.load();
-  float pkRad = s_pocketRadius.load();
-
-  // Scratch foul: Striker enters pocket
-  if (sim.strikerInPocket ||
-      isInsidePocketHole(sim.finalStrikerX, sim.finalStrikerY, pkInset,
-                         pkRad)) {
-    return false;
-  }
-
-  if (!sim.hasFirstContact || sim.puckTrajectories.empty()) {
-    return false;
-  }
-
-  // Check if striker bounced before hitting puck
-  bool strikerHadBounce = false;
-  for (const auto &seg : sim.segments) {
-    if (seg.isCushionBounce) {
-      strikerHadBounce = true;
-      break;
-    }
-    if (seg.isPuckHit)
-      break;
-  }
-  if (strikerHadBounce) {
-    // FORBIDDEN: Striker hitting a wall before hitting a puck is strictly
-    // disallowed!
-    return false;
-  }
-
-  // Count secondary intermediate puck collisions with non-trivial movement or
-  // hit speed
-  int secondaryPuckHits = 0;
-  for (const auto &traj : sim.puckTrajectories) {
-    if (traj.puckIndex != sim.firstContactPuckId) {
-      double dMoved =
-          std::hypot(traj.finalX - traj.startX, traj.finalY - traj.startY);
-      if (traj.isHit && (traj.hitSpeed > 2.0 || dMoved > 0.35)) {
-        secondaryPuckHits++;
-      }
-    }
-  }
-
-  // Check if first-contact puck had any cushion bounce before/during collision
-  bool firstPuckHadCushion = false;
-  for (const auto &pt : sim.puckTrajectories) {
-    if (pt.puckIndex == sim.firstContactPuckId) {
-      for (const auto &seg : pt.segments) {
-        if (seg.isCushionBounce) {
-          firstPuckHadCushion = true;
-          break;
-        }
-      }
-      break;
-    }
-  }
-
-  for (const auto &traj : sim.puckTrajectories) {
-    if (!traj.inPocket)
-      continue;
-
-    // Target Puck Color Filter (0=Auto, 1=White Only, 2=Black Only, 3=Any/Disc
-    // Pool/Points)
-    int mode = s_targetColorMode.load();
-    if (mode == 0) {
-      mode = s_autoDetectedColor.load();
-    }
-    bool isPuckAllowed = false;
-    if (traj.puckType == 3) {
-      isPuckAllowed = true; // Queen is always a valid scoring target
-    } else if (mode == 1) {
-      isPuckAllowed = (traj.puckType == 1); // White only
-    } else if (mode == 2) {
-      isPuckAllowed = (traj.puckType == 2); // Black only
-    } else if (mode == 3) {
-      isPuckAllowed = true; // Any puck (Freestyle / Disc Pool)
-    } else {
-      // Auto mode: Allow White (1) or Black (2) based on active board targets
-      isPuckAllowed = (traj.puckType == 1 || traj.puckType == 2);
-    }
-
-    if (!isPuckAllowed) {
-      continue;
-    }
-
-    int puckCushBounces = 0;
-    for (const auto &seg : traj.segments) {
-      if (seg.isCushionBounce)
-        puckCushBounces++;
-    }
-
-    int tier = 99;
-    if (traj.puckIndex == sim.firstContactPuckId && puckCushBounces == 0) {
-      // Direct Clean Pot (0 cushions, direct striker hit on target puck)
-      // If cluster pucks are disturbed: Tier 1 with cluster disturbance
-      tier = (secondaryPuckHits == 0) ? 1 : 2;
-    } else if (traj.puckIndex == sim.firstContactPuckId &&
-               (puckCushBounces == 1 || puckCushBounces == 2)) {
-      // Bank Pot (1 or 2 cushions)
-      tier = (secondaryPuckHits == 0) ? 2 : 3;
-    } else if (traj.puckIndex != sim.firstContactPuckId) {
-      // Combination / Cannon / Cluster Kiss Pot (Striker -> Puck A -> ... ->
-      // Target Puck -> Pocket)
-      tier = 3;
-    }
-
-    // Only Tiers 1, 2, and 3 are allowed!
-    if (tier > 3) {
-      continue;
-    }
-
-    // 1. Distance from striker to impact point
-    double dStriker = std::hypot(sim.firstImpactStrikerX - candX,
-                                 sim.firstImpactStrikerY - candY);
-    // 2. Distance from impact point to pocket
-    double dPuck = std::hypot(traj.finalX - sim.firstImpactPuckX,
-                              traj.finalY - sim.firstImpactPuckY);
-    double totalPathLength = dStriker + dPuck;
-
-    // 3. Cut Angle: straightness deviation from direct head-on pocket path
-    double aimAngle =
-        std::atan2(sim.firstImpactPuckY - candY, sim.firstImpactPuckX - candX);
-    double potAngle = std::atan2(traj.finalY - sim.firstImpactPuckY,
-                                 traj.finalX - sim.firstImpactPuckX);
-    double cutAngle = std::abs(potAngle - aimAngle);
-    while (cutAngle > M_PI)
-      cutAngle = std::abs(cutAngle - 2.0 * M_PI);
-    double cutDeg = cutAngle * 180.0 / M_PI;
-
-    // Thin cut filter:
-    if (tier == 1 && cutDeg > 75.0)
-      continue;
-    if (tier == 2 && cutDeg > 65.0)
-      continue;
-    if (tier == 3 && cutDeg > 60.0)
-      continue;
-
-    // Pocket Entry Quality
-    double dToPocketCenter = std::hypot(traj.pocketCenterX - traj.finalX,
-                                        traj.pocketCenterY - traj.finalY);
-
-    // Risk engine
-    double risk = 0.0;
-    if (tier == 1)
-      risk += 5.0;
-    else if (tier == 2)
-      risk += (secondaryPuckHits > 0) ? 25.0 : 20.0;
-    else if (tier == 3)
-      risk += (secondaryPuckHits > 1) ? 42.0 : 35.0;
-
-    if (secondaryPuckHits > 0) {
-      risk += std::min(15.0, secondaryPuckHits * 3.5);
-    }
-
-    if (cutDeg > 12.0 && cutDeg <= 40.0) {
-      risk += (cutDeg - 12.0) * 0.40;
-    } else if (cutDeg > 40.0) {
-      risk += 28.0 * 0.40 + (cutDeg - 40.0) * 0.85;
-    }
-
-    if (totalPathLength > 35.0) {
-      risk += (totalPathLength - 35.0) * 0.35;
-    }
-    if (dToPocketCenter < 0.60) {
-      risk -= 8.0;
-    }
-    risk = std::clamp(risk, 1.0, 99.0);
-
-    // Scoring: Massive bonus for straight shots so they dominate over any other
-    // shots
-    double baseScore =
-        (tier == 1) ? 200000.0 : ((tier == 2) ? 80000.0 : 40000.0);
-    if (secondaryPuckHits > 0 && tier == 1) {
-      baseScore = 150000.0;
-    }
-    double straightBonus = 0.0;
-    if (tier == 1) {
-      if (cutDeg < 12.0) {
-        straightBonus = 500000.0; // Dead straight shot! Total score > 700,000!
-      } else if (cutDeg < 25.0) {
-        straightBonus =
-            300000.0; // Clean slight cut shot! Total score > 500,000!
-      }
-    }
-    double queenBonus = (traj.puckType == 3) ? 15000.0 : 0.0;
-    int targetColor = (mode == 2) ? 2 : 1;
-    double myPuckBonus = (traj.puckType == targetColor) ? 5000.0 : 0.0;
-
-    double centeringBonus = std::max(0.0, (pkRad - dToPocketCenter)) * 40000.0;
-    double finalScore = baseScore + straightBonus + (100.0 - risk) * 250.0 +
-                        centeringBonus + queenBonus + myPuckBonus;
-
-    outCand->candX = candX;
-    outCand->candY = candY;
-    outCand->angleRad = angleRad;
-    double effectiveForce = forceVal;
-    if (tier == 1 && totalPathLength < 45.0) {
-      effectiveForce =
-          std::clamp(0.60 + 0.40 * (totalPathLength / 45.0), 0.65, 1.0);
-    }
-    outCand->forceVal = effectiveForce;
-    outCand->tier = tier;
-    outCand->score = finalScore;
-    outCand->riskScore = risk;
-    outCand->targetPuckId = traj.puckIndex;
-    outCand->targetPuckType = traj.puckType;
-    outCand->potted = true;
-    outCand->pocketId = traj.pocketIndex;
-    outCand->cushionCount = puckCushBounces;
-    outCand->secondaryHits = secondaryPuckHits;
-    outCand->cutAngleDeg = cutDeg;
-    outCand->puckStartX = traj.startX;
-    outCand->puckStartY = traj.startY;
-    outCand->predLandingX = traj.finalX;
-    outCand->predLandingY = traj.finalY;
-    return true;
-  }
-
-  return false;
-}
-
 bool GraphicsEngine_ScanAndExecuteBestShot() {
   if (!s_autoShotEnabled.load()) {
     return false;
@@ -3247,17 +3141,6 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
     return false;
   }
 
-  int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now().time_since_epoch())
-                      .count();
-  int64_t scanStart = s_turnScanStartTimeMs.load();
-  if (scanStart == 0) {
-    s_turnScanStartTimeMs.store(nowMs);
-    scanStart = nowMs;
-  }
-  // Bank or combo fallback shots immediately allowed (ZERO artificial delay)
-  bool allowFallback = true;
-
   // 1. Get live striker position and dynamic baseline
   double curStX = 0.0, curStY = -25.35;
   if (!CatEngine_GetLiveStrikerPos(&curStX, &curStY)) {
@@ -3268,491 +3151,22 @@ bool GraphicsEngine_ScanAndExecuteBestShot() {
   double baselineY = (curStY > 0.0) ? 25.35 : -25.35;
   s_strikerX = curStX;
   s_strikerY = baselineY;
-  bool isTopBaseline = (baselineY > 0.0);
-
-  float minX = s_baselineMinX.load();
-  float maxX = s_baselineMaxX.load();
-  if (minX >= maxX || minX < -35.0f || maxX > 35.0f) {
-    minX = -23.85f;
-    maxX = 23.85f;
-  }
-
-  float pkInset = s_pocketInset.load();
-  float pkRad = s_pocketRadius.load();
-  float stRad = s_strikerRadius.load();
-  float pRad = s_puckRadius.load();
-
-  std::vector<TablePuckEntry> targets;
-  int countQueen = 0, countWhite = 0, countBlack = 0;
-  {
-    std::lock_guard<std::mutex> lock(s_puckMutex);
-    for (const auto &pe : s_puckList) {
-      if (pe.active && !isPuckPottedOrInvalid(pe.x, pe.y, pkInset, pkRad)) {
-        targets.push_back(pe);
-        if (pe.puckType == 3)
-          countQueen++;
-        else if (pe.puckType == 2)
-          countBlack++;
-        else
-          countWhite++;
-      }
-    }
-  }
-
-  if (targets.empty()) {
-    CatEngine_UpdateTablePucks();
-    std::lock_guard<std::mutex> lock(s_puckMutex);
-    for (const auto &pe : s_puckList) {
-      if (pe.active && !isPuckPottedOrInvalid(pe.x, pe.y, pkInset, pkRad)) {
-        targets.push_back(pe);
-        if (pe.puckType == 3)
-          countQueen++;
-        else if (pe.puckType == 2)
-          countBlack++;
-        else
-          countWhite++;
-      }
-    }
-  }
-
-  if (targets.empty()) {
-    ALOGW("[AUTO-SHOT FAILURE] No active target pucks detected on table.");
-    s_isActivelySearching.store(false);
-    return false;
-  }
 
   s_isActivelySearching.store(true);
-
-  int targetMode =
-      s_targetColorMode.load(); // 0=Auto, 1=White Only, 2=Black Only,
-                                // 3=Any/Disc Pool, 4=2v2 Teams
-  int matchPlayers = CatEngine_GetMatchPlayerCount();
-
-  int effectiveColor = targetMode;
-  if (effectiveColor == 0 || effectiveColor == 4) {
-    effectiveColor = s_autoDetectedColor.load();
-  }
-  auto isTargetAllowed = [&](int puckType) -> bool {
-    if (puckType == 3)
-      return true; // Queen always targetable
-    if (targetMode == 3 || matchPlayers == 3)
-      return true; // Any coin in Disc Pool or 3-player
-    if (effectiveColor == 1)
-      return (puckType == 1); // White only
-    if (effectiveColor == 2)
-      return (puckType == 2); // Black only
-    if (countWhite > 0 && countBlack == 0)
-      return (puckType == 1);
-    if (countBlack > 0 && countWhite == 0)
-      return (puckType == 2);
-    return true; // If effectiveColor == 0 (undecided), both colors are allowed!
-  };
-
-  const double pocketCenters[4][2] = {{pkInset, pkInset},
-                                      {-pkInset, pkInset},
-                                      {pkInset, -pkInset},
-                                      {-pkInset, -pkInset}};
-
-  CandidateShot bestTier1;
-  CandidateShot bestTier2;
-  CandidateShot bestTier3;
-  bool hasTier1 = false;
-  bool hasTier2 = false;
-  bool hasTier3 = false;
   CandidateShot bestShot;
-  bool foundShot = false;
-
-  auto registerCandidate = [&](const CandidateShot &cand) {
-    if (cand.tier == 1) {
-      if (!hasTier1 || cand.score > bestTier1.score) {
-        bestTier1 = cand;
-        hasTier1 = true;
-      }
-    } else if (cand.tier == 2) {
-      if (!hasTier2 || cand.score > bestTier2.score) {
-        bestTier2 = cand;
-        hasTier2 = true;
-      }
-    } else if (cand.tier == 3) {
-      if (!hasTier3 || cand.score > bestTier3.score) {
-        bestTier3 = cand;
-        hasTier3 = true;
-      }
-    }
-  };
-
-  auto isBaselineBlocked = [&](double bx) -> bool {
-    for (const auto &tgt : targets) {
-      double dx = tgt.x - bx;
-      double dy = tgt.y - baselineY;
-      if (std::hypot(dx, dy) < (stRad + pRad + 0.15)) {
-        return true; // Overlaps a puck sitting on baseline
-      }
-    }
-    return false;
-  };
-
-  // =========================================================================
-  // STEP 1: ULTRA-FAST GHOST-BALL GEOMETRIC TARGETING (POCKET BACK-PROJECTION)
-  // Computes ghost-ball impact coordinates (S_x, S_y) for every puck & pocket.
-  // Checks path clearance and tests straight and low-cut candidate positions.
-  // Only ~30-50 high-probability raycasts simulated!
-  // =========================================================================
-  for (const auto &tgt : targets) {
-    if (!isTargetAllowed(tgt.puckType))
-      continue;
-
-    for (int p = 0; p < 4; p++) {
-      double Px = pocketCenters[p][0];
-      double Py = pocketCenters[p][1];
-
-      double dx = Px - tgt.x;
-      double dy = Py - tgt.y;
-      double dPocket = std::hypot(dx, dy);
-      if (dPocket < 1.0)
-        continue;
-
-      double nx = dx / dPocket;
-      double ny = dy / dPocket;
-
-      double contactDist = stRad + pRad;
-      double S_x = tgt.x - contactDist * nx;
-      double S_y = tgt.y - contactDist * ny;
-
-      double deltaY = S_y - baselineY;
-      if (isTopBaseline && deltaY >= -1.5)
-        continue;
-      if (!isTopBaseline && deltaY <= 1.5)
-        continue;
-
-      // Check if path from target puck to pocket is blocked by any other puck
-      bool pocketPathBlocked = false;
-      for (const auto &other : targets) {
-        if (other.id == tgt.id)
-          continue;
-        if (distSqToSegment(other.x, other.y, tgt.x, tgt.y, Px, Py) <
-            (pRad * 1.85) * (pRad * 1.85)) {
-          pocketPathBlocked = true;
-          break;
-        }
-      }
-      if (pocketPathBlocked)
-        continue;
-
-      // Collect targeted baseline X positions
-      std::vector<double> candXList;
-      candXList.reserve(6);
-
-      // 1. Exact 0-degree straight collinear position
-      double straightX = 0.0;
-      bool hasStraight = false;
-      if (std::abs(ny) > 0.05) {
-        straightX = S_x - deltaY * (nx / ny);
-        if (straightX >= minX && straightX <= maxX) {
-          candXList.push_back(straightX);
-          hasStraight = true;
-        }
-      }
-
-      // 2. Current striker X position
-      if (curStX >= minX && curStX <= maxX) {
-        candXList.push_back(curStX);
-      }
-
-      // 3. Strategic small cut positions
-      if (hasStraight) {
-        if (straightX - 3.5 >= minX)
-          candXList.push_back(straightX - 3.5);
-        if (straightX + 3.5 <= maxX)
-          candXList.push_back(straightX + 3.5);
-      } else if (std::abs(ny) > 0.05) {
-        double clampedEdge = std::clamp(straightX, (double)minX, (double)maxX);
-        candXList.push_back(clampedEdge);
-      }
-
-      // Test candidate baseline X positions
-      for (double testX : candXList) {
-        if (isBaselineBlocked(testX))
-          continue;
-
-        // Check if path from striker to ghost ball is blocked by any other puck
-        bool strikerPathBlocked = false;
-        for (const auto &other : targets) {
-          if (other.id == tgt.id)
-            continue;
-          if (distSqToSegment(other.x, other.y, testX, baselineY, S_x, S_y) <
-              (stRad + pRad - 0.25) * (stRad + pRad - 0.25)) {
-            strikerPathBlocked = true;
-            break;
-          }
-        }
-
-        double aimAngle = std::atan2(S_y - baselineY, S_x - testX);
-        s_scanLiveX.store(testX);
-        s_scanLiveY.store(baselineY);
-        s_scanLiveAngle.store(aimAngle);
-        AimSimulationResult sim =
-            simulateStrikerTrajectory(testX, baselineY, aimAngle, 1.0, 1200);
-        CandidateShot cand;
-        if (evaluateCandidateShot(sim, static_cast<float>(testX),
-                                  static_cast<float>(baselineY), aimAngle, 1.0,
-                                  &cand, true)) {
-          registerCandidate(cand);
-          if (s_fastFirstShotMode.load() && cand.potted) {
-            bestShot = cand;
-            foundShot = true;
-            goto execute_selected_shot;
-          }
-          if (cand.tier == 1 && cand.cutAngleDeg < 25.0 &&
-              !strikerPathBlocked) {
-            bestShot = cand;
-            foundShot = true;
-            goto execute_selected_shot;
-          }
-        }
-      }
-    }
-  }
-
-  if (hasTier1 && bestTier1.cutAngleDeg < 25.0) {
-    goto select_shot;
-  }
-
-  // =========================================================================
-  // STEP 2: TARGETED DIRECT RAYS FROM CURRENT STRIKER POSITION
-  // Only tests direct lines towards target pucks (NO striker cushion bounces!)
-  // =========================================================================
-  for (const auto &tgt : targets) {
-    if (!isTargetAllowed(tgt.puckType))
-      continue;
-
-    double baseAngle = std::atan2(tgt.y - baselineY, tgt.x - curStX);
-    const double deltaAngles[3] = {-0.025, 0.0, 0.025};
-    for (double dAng : deltaAngles) {
-      double rad = baseAngle + dAng;
-      s_scanLiveX.store(curStX);
-      s_scanLiveY.store(baselineY);
-      s_scanLiveAngle.store(rad);
-      AimSimulationResult sim =
-          simulateStrikerTrajectory(curStX, baselineY, rad, 1.0, 1200);
-      CandidateShot cand;
-      if (evaluateCandidateShot(sim, static_cast<float>(curStX),
-                                static_cast<float>(baselineY), rad, 1.0, &cand,
-                                true)) {
-        registerCandidate(cand);
-        if (s_fastFirstShotMode.load() && cand.potted) {
-          bestShot = cand;
-          foundShot = true;
-          goto execute_selected_shot;
-        }
-      }
-    }
-  }
-
-  if (hasTier1 && bestTier1.cutAngleDeg < 30.0) {
-    goto select_shot;
-  }
-
-  // =========================================================================
-  // STEP 3: BASELINE SLIDE DENSE SEARCH (Fallback for remaining pockets and
-  // complex clusters)
-  // =========================================================================
-  for (float candX = minX; candX <= maxX; candX += 2.0f) {
-    if (isBaselineBlocked(candX))
-      continue;
-    for (const auto &tgt : targets) {
-      if (!isTargetAllowed(tgt.puckType))
-        continue;
-      for (int p = 0; p < 4; p++) {
-        double Px = pocketCenters[p][0];
-        double Py = pocketCenters[p][1];
-        double dx = Px - tgt.x;
-        double dy = Py - tgt.y;
-        double dPocket = std::hypot(dx, dy);
-        if (dPocket < 1.0)
-          continue;
-        double nx = dx / dPocket;
-        double ny = dy / dPocket;
-        double contactDist = stRad + pRad;
-        double S_x = tgt.x - contactDist * nx;
-        double S_y = tgt.y - contactDist * ny;
-        double deltaY = S_y - baselineY;
-        if (isTopBaseline && deltaY >= -1.0)
-          continue;
-        if (!isTopBaseline && deltaY <= 1.0)
-          continue;
-
-        double ax = S_x - candX;
-        double ay = S_y - baselineY;
-        double dApp = std::hypot(ax, ay);
-        if (dApp < 1.0)
-          continue;
-        double dotCut = (ax * nx + ay * ny) / dApp;
-        if (dotCut < 0.35)
-          continue; // Cut angle > 70 degrees, skip
-
-        double aimAngle = std::atan2(ay, ax);
-        AimSimulationResult sim =
-            simulateStrikerTrajectory(candX, baselineY, aimAngle, 1.0, 1200);
-        CandidateShot cand;
-        if (evaluateCandidateShot(sim, candX, static_cast<float>(baselineY),
-                                  aimAngle, 1.0, &cand, true)) {
-          registerCandidate(cand);
-          if (s_fastFirstShotMode.load() && cand.potted) {
-            bestShot = cand;
-            foundShot = true;
-            goto execute_selected_shot;
-          }
-        }
-      }
-    }
-    if (hasTier1 && bestTier1.score > 400000.0) {
-      break;
-    }
-  }
-
-select_shot:
+  bool foundShot = GraphicsEngine_FindBestCandidateShot(&bestShot, curStX, curStY);
   s_isActivelySearching.store(false);
 
-  // Direct priority hierarchy with Lowest Risk scoring:
-  // Tier 1 direct > Tier 2 bank > Tier 3 combo > Tier 4 Safety Turn Passer
-  if (hasTier1) {
-    bestShot = bestTier1;
-    foundShot = true;
-  } else if (hasTier2) {
-    bestShot = bestTier2;
-    foundShot = true;
-  } else if (hasTier3) {
-    bestShot = bestTier3;
-    foundShot = true;
-  } else {
-    // Tier 4: Safety Placement / Turn Passer shot to prevent timeout foul!
-    float remSec = CatEngine_GetTurnRemainingSeconds();
-    if (remSec <= 6.0f || !targets.empty()) {
-      CandidateShot bestSafety;
-      bool hasSafety = false;
-      double bestSafetyScore = -999999.0;
-
-      for (double candX = minX + 1.5; candX <= maxX - 1.5; candX += 3.5) {
-        for (const auto &tgt : targets) {
-          if (!isTargetAllowed(tgt.puckType))
-            continue;
-
-          double ax = tgt.x - candX;
-          double ay = tgt.y - baselineY;
-          double dApp = std::hypot(ax, ay);
-          if (dApp < 1.0)
-            continue;
-
-          double aimAngle = std::atan2(ay, ax);
-          double safeForce = 0.50; // Controlled gentle shot to break cluster
-                                   // and pass turn safely
-
-          AimSimulationResult sim = simulateStrikerTrajectory(
-              candX, baselineY, aimAngle, safeForce, 1500);
-
-          // Safety verification invariants:
-          // 1. Striker MUST NOT scratch into any pocket!
-          if (sim.strikerInPocket)
-            continue;
-          // 2. Opponent puck MUST NOT be pocketed!
-          bool opponentPocketed = false;
-          for (const auto &traj : sim.puckTrajectories) {
-            if (traj.inPocket && !isTargetAllowed(traj.puckType)) {
-              opponentPocketed = true;
-              break;
-            }
-          }
-          if (opponentPocketed)
-            continue;
-
-          double safetyScore = 50000.0 - (dApp * 200.0);
-          if (!hasSafety || safetyScore > bestSafetyScore) {
-            bestSafety.candX = candX;
-            bestSafety.candY = baselineY;
-            bestSafety.angleRad = aimAngle;
-            bestSafety.forceVal = safeForce;
-            bestSafety.tier = 4;
-            bestSafety.score = safetyScore;
-            bestSafety.targetPuckId = tgt.id;
-            bestSafety.targetPuckType = tgt.puckType;
-            bestSafety.puckStartX = tgt.x;
-            bestSafety.puckStartY = tgt.y;
-            bestSafety.predLandingX = tgt.x + 2.0;
-            bestSafety.predLandingY = tgt.y + 2.0;
-            bestSafety.potted = false;
-            bestSafety.pocketId = -1;
-            bestSafety.cushionCount = 0;
-            bestSafety.secondaryHits = 0;
-            bestSafety.cutAngleDeg = 0.0;
-            bestSafetyScore = safetyScore;
-            hasSafety = true;
-          }
-        }
-      }
-
-      if (hasSafety) {
-        bestShot = bestSafety;
-        foundShot = true;
-        ALOGI("[AUTO-SHOT] Executing Tier 4 Safety / Turn Passer (Timer=%.1fs, "
-              "Force=%.2f) to avoid timeout foul!",
-              remSec, bestShot.forceVal);
-      }
-    }
-
-    if (!foundShot) {
-      return false;
-    }
-  }
-
-execute_selected_shot:
-  s_isActivelySearching.store(false);
-
-  // Auto-shot requires either a confirmed pocketing shot (Tier 1-3) or a
-  // validated Safety Shot (Tier 4)
   if (!foundShot) {
     return false;
   }
+
+  // Auto-shot requires either a confirmed pocketing shot (Tier 1-3) or a
+  // validated Safety Shot (Tier 4)
   if (bestShot.tier <= 3) {
     if (!bestShot.potted || bestShot.pocketId < 0 || bestShot.pocketId >= 4) {
       return false;
     }
-  }
-
-  // 100% Precision Multi-Step Refinement pass: fine-tune angle directly into
-  // dead center of pocket
-  if (!s_fastFirstShotMode.load() && bestShot.tier <= 3) {
-    double refinedAngle = bestShot.angleRad;
-    double minPocketDist = 999.0;
-    double bestRefinedScore = bestShot.score;
-
-    // 11-step micro-sweep around candidate angle in 0.003 rad steps
-    for (double delta = -0.015; delta <= 0.0151; delta += 0.003) {
-      double a = bestShot.angleRad + delta;
-      AimSimulationResult sim = simulateStrikerTrajectory(
-          bestShot.candX, baselineY, a, bestShot.forceVal, 600);
-      CandidateShot cand;
-      if (evaluateCandidateShot(sim, bestShot.candX,
-                                static_cast<float>(baselineY), a,
-                                bestShot.forceVal, &cand, true)) {
-        if (cand.potted && cand.tier <= bestShot.tier) {
-          double dCenter = 999.0;
-          for (const auto &traj : sim.puckTrajectories) {
-            if (traj.inPocket) {
-              dCenter = std::hypot(traj.pocketCenterX - traj.finalX,
-                                   traj.pocketCenterY - traj.finalY);
-              break;
-            }
-          }
-          if (dCenter < minPocketDist) {
-            minPocketDist = dCenter;
-            refinedAngle = a;
-            bestRefinedScore = cand.score;
-          }
-        }
-      }
-    }
-    bestShot.angleRad = refinedAngle;
   }
 
   s_turnScanStartTimeMs.store(0);
@@ -3762,11 +3176,6 @@ execute_selected_shot:
   double targetX = bestShot.candX;
   double targetAngle = bestShot.angleRad;
   double targetForce = bestShot.forceVal;
-
-  // Apply real-time adaptive AI learning correction
-  targetAngle =
-      catengine::ai::AdaptiveLearningEngine::getInstance().getCorrectedAimAngle(
-          targetAngle, bestShot.cutAngleDeg, 30.0);
 
   // Move striker horizontally along baseline to target X position
   if (std::abs(targetX - startX) > 0.08) {

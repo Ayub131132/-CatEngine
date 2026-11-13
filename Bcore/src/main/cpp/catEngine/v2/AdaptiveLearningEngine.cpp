@@ -124,7 +124,7 @@ void AdaptiveLearningEngine::fetchLivePhysicsConstants() {
 
     // Pocket physics (libgame.so 0x1998844, 0x199884c)
     if (tryReadFloatAtOffset(base, 0x1998844, lc.pocketDropMaxSpeed) &&
-        lc.pocketDropMaxSpeed > 50.0f && lc.pocketDropMaxSpeed < 1000.0f) { fetched++; } else { lc.pocketDropMaxSpeed = 180.0f; }
+        lc.pocketDropMaxSpeed > 50.0f && lc.pocketDropMaxSpeed < 1000.0f) { fetched++; } else { lc.pocketDropMaxSpeed = 250.0f; }
     if (tryReadFloatAtOffset(base, 0x199884c, lc.pocketGravity) &&
         lc.pocketGravity > 100.0f && lc.pocketGravity < 10000.0f)         { fetched++; } else { lc.pocketGravity = 980.0f; }
 
